@@ -1,7 +1,14 @@
 # OXFP - Original Xbox Front Panel RGB Controller
 
+<div align=center>
+  <img src="https://github.com/Darkone83/oxfp/blob/main/images/DC%20logo.png">
+</div>
+
 OXFP is a highly flexible RGB controller for the original Xbox front panel, supporting original LED status mirroring, full color override, and advanced animations. It is designed for the ESP32 platform and includes a built-in WiFi configuration portal and web-based RGB control.
 
+<div align=center>
+  <img src="https://github.com/Darkone83/oxfp/blob/main/images/Render_Front.png" height=300 width=300><img src="https://github.com/Darkone83/oxfp/blob/main/images/Render_Back.png" height=300 width=300>
+</div>
 ---
 
 ## Features
@@ -41,17 +48,7 @@ Install these libraries via the Arduino Library Manager:
 
 ## Hardware Connections
 
-- **Inputs:**  
-  - LGI (Left Green In) → IO1  
-  - RGI (Right Green In) → IO2  
-  - LRI (Left Red In) → IO3  
-  - RRI (Right Red In) → IO4
-
-- **WS2812 RGB LEDs:**  
-  - Data In → IO5  
-  - Two WS2812 LEDs, chained.
-
----
+You will need to remove the connector from your original Xbox front panel connector and solder to the OXFP. then you will need to run a spare 5V wire to the 5V pad
 
 ## Setup & Usage
 
@@ -64,7 +61,7 @@ Install these libraries via the Arduino Library Manager:
 
 ### 2. **WiFi Configuration**
 
-- On first boot, the device starts in **WiFi Access Point mode** as `OXFP-XXXXXX` (where XXXXXX are last MAC digits).
+- On first boot, the device starts in **WiFi Access Point mode** as `OXFP Setup`.
 - Connect to this WiFi with your phone or computer.
 - The captive portal or [http://192.168.4.1](http://192.168.4.1) will let you join your main WiFi network.
 
