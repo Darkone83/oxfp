@@ -9,7 +9,6 @@ OXFP is a highly flexible RGB controller for the original Xbox front panel, supp
 <div align=center>
   <img src="https://github.com/Darkone83/oxfp/blob/main/images/Render_Front.png" height=300 width=300><img src="https://github.com/Darkone83/oxfp/blob/main/images/Render_Back.png" height=300 width=300>
 </div>
----
 
 ## Features
 
@@ -31,7 +30,6 @@ OXFP is a highly flexible RGB controller for the original Xbox front panel, supp
 - **Settings Persistence:**  
   All user settings are saved in flash and recalled automatically on boot.
 
----
 
 ## Required Libraries
 
@@ -44,7 +42,6 @@ Install these libraries via the Arduino Library Manager:
 - [ArduinoJson](https://arduinojson.org/)
 - [Preferences](https://github.com/espressif/arduino-esp32/tree/master/libraries/Preferences)
 
----
 
 ## Hardware Connections
 
@@ -79,7 +76,6 @@ You will need to remove the connector from your original Xbox front panel connec
     - **Animation**: Select from several effects. User colors (where applicable) and brightness are used.
 - Click **Save** to apply and persist settings.
 
----
 
 ## Modes Overview
 
@@ -99,24 +95,19 @@ You will need to remove the connector from your original Xbox front panel connec
 - **Color Chase**: LEDs alternate between two user-selected colors in a chasing pattern.
 - **Sparkle**: Both LEDs randomly pick between two colors or off, creating a sparkling effect.
 
----
-
 ## Additional Notes
 
 - All configuration changes are persistent and will be restored on reboot.
 - If you lose WiFi access, hold the device reset to re-enter WiFi setup mode.
 
----
 
 ## License
 
 MIT License
 
----
 
 ### Attribution
 
 If you modify and redistribute this code, **please credit Darkone83 for the original source**.
 
----
 
