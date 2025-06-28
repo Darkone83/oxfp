@@ -2,19 +2,21 @@
 #include "led_stat.h"
 #include "wifimgr.h"
 #include "oxfp_orig.h"
-#include "oxfp_config.h"
+#include "OXFP_config.h"
 #include <ESPmDNS.h>
 
 void setup() {
     Serial.begin(115200);
-    delay(1000); // Give time for serial monitor
+    delay(1000);
 
     LedStat::begin();
     WiFiMgr::begin();
     OXFP_orig::begin();
-    OXFP_config::begin(WiFiMgr::getServer());
 
-    // mDNS will be started in loop() after WiFi connects
+    // Attach the config UI to the main server from WiFiMgr
+    OXFP_config::begin(WiFiMgr::getServer());
+    OXFP_config::loadPreferences();
+    OXFP_config::applyConfig(); // Initial apply
 }
 
 void loop() {
@@ -31,12 +33,8 @@ void loop() {
         }
     }
 
-    // --- LED Logic Selection ---
-    if (OXFP_config::isActive()) {
-        OXFP_config::loop();  // Web config/animation/static mode is active: override!
-    } else {
-        OXFP_orig::loop();    // Stock Xbox behavior
-    }
+    OXFP_config::applyConfig(); // Main config logic (handles preview, animation, etc)
+    OXFP_orig::loop();          // (Handles Xbox input fallback if in stock mode)
 
-    delay(10); // Avoid starving CPU
+    delay(10);
 }

@@ -1,37 +1,56 @@
 #pragma once
+
 #include <Arduino.h>
 #include <ESPAsyncWebServer.h>
 
+// --- Animation Modes ---
+enum class OXFP_AnimMode : uint8_t {
+    ColorBounce = 0,
+    Breathing,
+    Chase,
+    RGBFade,
+    Blinking,
+    Alternating,
+    FireFlicker,
+    Animation_Count // Not a mode; counts modes for UI
+};
+
+// --- Main Control Modes ---
+enum class OXFP_Mode : uint8_t {
+    Stock = 0,   // Default (use OXFP_orig pin logic)
+    Static,      // User color choices for "Green", "Red", "Orange"
+    Animation    // Runs one of the animation modes
+};
+
+// --- Color structure (packed RGB) ---
+struct OXFP_RGB {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+};
+
+struct OXFP_Config {
+    OXFP_Mode mode = OXFP_Mode::Stock;              // Stock/Static/Animation
+    uint8_t brightness = 128;                       // 0-255 global LED brightness
+    // Static mode colors (for both LEDs)
+    OXFP_RGB greenColor = {0, 255, 0};              // Default Xbox green
+    OXFP_RGB redColor   = {255, 0, 0};              // Default red
+    OXFP_RGB orangeColor= {255, 128, 0};            // Default amber/orange
+
+    // Animation mode
+    OXFP_AnimMode animMode = OXFP_AnimMode::ColorBounce;
+    OXFP_RGB animColorA    = {0, 128, 255};  // LED 0
+    OXFP_RGB animColorB    = {255, 0, 128};  // LED 1
+    uint8_t animSpeed      = 5;
+};
+
 namespace OXFP_config {
-    enum Mode : uint8_t { Static = 0, Animation = 1 };
-
-    enum Animation : uint8_t {
-        Pulse = 0,
-        Fade,
-        Rainbow,
-        DualRainbow,
-        ColorChase,
-        Sparkle,
-        AnimationCount // keep this last!
-    };
-
-    struct Settings {
-        Mode mode;
-        uint8_t static_right_red;
-        uint8_t static_right_green;
-        uint8_t static_right_orange;
-        uint8_t static_left_red;
-        uint8_t static_left_green;
-        uint8_t static_left_orange;
-        uint8_t animation_id;     // which effect
-        uint8_t animation_color_a; // main color (palette index)
-        uint8_t animation_color_b; // secondary/accent color (palette index, used for some modes)
-        uint8_t brightness; // 0-255
-    };
-
-    void begin(AsyncWebServer& server);
-    void loop();
-    const Settings& getSettings();
-    void setSettings(const Settings& s);
-    bool isActive();
+    void begin(AsyncWebServer& server);         // Attach web routes/UI
+    void loadPreferences();                     // Load settings from NVS
+    void savePreferences();                     // Save settings to NVS
+    void resetPreferences();                    // Reset to defaults
+    void applyConfig();                         // Call from loop, applies selected mode/animation
+    void preview(const OXFP_Config& tmp);       // Temporarily preview a given config
+    const OXFP_Config& getConfig();             // Get current config
 }
+

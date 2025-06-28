@@ -3,9 +3,10 @@
 #include <ESPAsyncWebServer.h>
 #include <Preferences.h>
 #include <DNSServer.h>
-#include <esp_wifi.h>
 #include "led_stat.h"
 #include <vector>
+#include "esp_wifi.h"
+#include <Update.h> // For OTA
 
 static AsyncWebServer server(80);
 namespace WiFiMgr {
@@ -58,31 +59,22 @@ void clearCreds() {
 
 void startPortal() {
     WiFi.disconnect(true);
-    delay(200);
-    WiFi.mode(WIFI_AP_STA);
     delay(100);
     setAPConfig();
+    WiFi.mode(WIFI_AP_STA);  // AP+STA for S3
+    delay(100);
 
-    bool apok = WiFi.softAP("OXFP Setup", NULL, 1, 0);
+    // Use channel 6 for iOS compatibility, or try 1
+    bool apok = WiFi.softAP("OXFP Setup", "", 6, 0);
     esp_wifi_set_max_tx_power(20);
     LedStat::setStatus(LedStatus::Portal);
     Serial.printf("[WiFiMgr] softAP result: %d, IP: %s\n", apok, WiFi.softAPIP().toString().c_str());
-    delay(500);
-
-    esp_wifi_set_ps(WIFI_PS_NONE);
-    esp_wifi_start();
-    LedStat::setStatus(LedStatus::Portal);
-
-    if (!apok) {
-        Serial.println("[WiFiMgr] softAP failed, retrying...");
-        WiFi.softAPdisconnect(true);
-        delay(200);
-        apok = WiFi.softAP("Type D EXT Setup", NULL, 1, 0);
-        delay(500);
-    }
+    delay(200);
 
     IPAddress apIP = WiFi.softAPIP();
     dnsServer.start(53, "*", apIP);
+
+    server.reset(); // Needed to avoid double route definition on multiple starts
 
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
         String page = R"rawliteral(
@@ -95,11 +87,9 @@ void startPortal() {
         body {background:#111;color:#EEE;font-family:sans-serif;}
         .container {max-width:320px;margin:24px auto;background:#222;padding:2em;border-radius:8px;box-shadow:0 0 16px #0008;}
         input,select,button {width:100%;box-sizing:border-box;margin:.7em 0;padding:.5em;font-size:1.1em;border-radius:5px;border:1px solid #555;}
-        .ssid-list {list-style:none;padding:0;margin:0 0 1em 0;}
-        .ssid-list li {background:#333;margin:3px 0;padding:.5em;border-radius:5px;cursor:pointer;text-align:left;}
-        .ssid-list li:hover {background:#2a4;}
         .btn-primary {background:#299a2c;color:white;}
         .btn-danger {background:#a22;color:white;}
+        .btn-ota {background:#265aa5;color:white;}
         .status {margin-top:1em;font-size:.95em;}
         label {display:block;margin-top:.5em;margin-bottom:.1em;}
     </style>
@@ -109,40 +99,49 @@ void startPortal() {
         <div style="width:100%;text-align:center;margin-bottom:1em">
             <span style="font-size:2em;font-weight:bold;">OXFP Setup</span>
         </div>
-        <ul class="ssid-list" id="ssidList"><li>Please select a network</li></ul>
         <form id="wifiForm">
             <label>WiFi Network</label>
-            <input type="text" id="ssid" placeholder="SSID">
+            <select id="ssidDropdown" style="margin-bottom:1em;">
+                <option value="">Please select a network</option>
+            </select>
+            <input type="text" id="ssid" placeholder="SSID" style="margin-bottom:1em;">
             <label>Password</label>
             <input type="password" id="pass" placeholder="WiFi Password">
             <button type="button" onclick="save()" class="btn-primary">Connect & Save</button>
             <button type="button" onclick="forget()" class="btn-danger">Forget WiFi</button>
+            <button type="button" onclick="window.location='/ota'" class="btn-ota">OTA Update</button>
         </form>
         <div class="status" id="status">Status: ...</div>
     </div>
     <script>
         function scan() {
             fetch('/scan').then(r => r.json()).then(list => {
-                let ul = document.getElementById('ssidList');
-                if (list.length === 0) {
-                    ul.innerHTML = '<li>Please select a network</li>';
-                } else {
-                    ul.innerHTML = '';
-                    list.forEach(ssid => {
-                        let li = document.createElement('li');
-                        li.textContent = ssid;
-                        li.onclick = () => document.getElementById('ssid').value = ssid;
-                        ul.appendChild(li);
-                    });
-                }
+                let dropdown = document.getElementById('ssidDropdown');
+                dropdown.innerHTML = '';
+                let defaultOpt = document.createElement('option');
+                defaultOpt.value = '';
+                defaultOpt.text = 'Please select a network';
+                dropdown.appendChild(defaultOpt);
+                list.forEach(ssid => {
+                    let opt = document.createElement('option');
+                    opt.value = ssid;
+                    opt.text = ssid;
+                    dropdown.appendChild(opt);
+                });
+                dropdown.onchange = function() {
+                    document.getElementById('ssid').value = dropdown.value;
+                };
             }).catch(() => {
-                document.getElementById('ssidList').innerText = 'Scan failed';
+                let dropdown = document.getElementById('ssidDropdown');
+                dropdown.innerHTML = '';
+                let opt = document.createElement('option');
+                opt.value = '';
+                opt.text = 'Scan failed';
+                dropdown.appendChild(opt);
             });
         }
-
-        setInterval(scan, 1500);
+        setInterval(scan, 2000);
         window.onload = scan;
-
         function save() {
             let ssid = document.getElementById('ssid').value;
             let pass = document.getElementById('pass').value;
@@ -154,7 +153,6 @@ void startPortal() {
                 document.getElementById('status').innerText = t;
             });
         }
-
         function forget() {
             fetch('/forget').then(r => r.text()).then(t => {
                 document.getElementById('status').innerText = t;
@@ -169,6 +167,73 @@ void startPortal() {
         request->send(200, "text/html", page);
     });
 
+    // === OTA PAGE ===
+    server.on("/ota", HTTP_GET, [](AsyncWebServerRequest *request){
+        String page = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>OTA Update</title>
+    <meta name="viewport" content="width=320,initial-scale=1">
+    <style>
+        body {background:#111;color:#EEE;font-family:sans-serif;}
+        .container {max-width:340px;margin:24px auto;background:#222;padding:2em;border-radius:8px;box-shadow:0 0 16px #0008;}
+        input[type=file],button {width:100%;box-sizing:border-box;margin:.7em 0;padding:.5em;font-size:1.1em;border-radius:5px;border:1px solid #555;}
+        .btn-update {background:#265aa5;color:white;}
+        .status {margin-top:1em;font-size:.95em;}
+        label {display:block;margin-top:.5em;margin-bottom:.1em;}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>OTA Update</h2>
+        <form id="otaForm" method="POST" action="/update" enctype="multipart/form-data">
+            <label>Select firmware .bin file</label>
+            <input type="file" name="firmware">
+            <button type="submit" class="btn-update">Upload & Flash</button>
+        </form>
+        <div id="otaStatus" class="status"></div>
+        <button onclick="window.location='/'" class="btn-update" style="margin-top:14px;">Back to WiFi Setup</button>
+    </div>
+</body>
+</html>
+        )rawliteral";
+        request->send(200, "text/html", page);
+    });
+
+    // === OTA FIRMWARE UPLOAD HANDLER ===
+    server.on("/update", HTTP_POST,
+        [](AsyncWebServerRequest *request){},
+        [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+            static bool updateError = false;
+            if (!index) {
+                Serial.printf("[OTA] Start update: %s\n", filename.c_str());
+                updateError = false;
+                if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { // start with max available size
+                    Update.printError(Serial);
+                    updateError = true;
+                }
+            }
+            if (!updateError && !Update.hasError()) {
+                if (Update.write(data, len) != len) {
+                    Update.printError(Serial);
+                    updateError = true;
+                }
+            }
+            if (final) {
+                if (!updateError && Update.end(true)) {
+                    Serial.println("[OTA] Update Success. Rebooting...");
+                    request->send(200, "text/plain", "Update complete! Rebooting...");
+                    delay(1200);
+                    ESP.restart();
+                } else {
+                    Update.printError(Serial);
+                    request->send(200, "text/plain", "Update failed! " + String(Update.errorString()));
+                }
+            }
+        }
+    );
+
     server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
         String stat;
         if (WiFi.status() == WL_CONNECTED)
@@ -180,7 +245,6 @@ void startPortal() {
         request->send(200, "text/plain", stat);
     });
 
-    // PATCH: Force AP shutdown and switch to STA before connect
     server.on("/connect", HTTP_GET, [](AsyncWebServerRequest *request){
         String ss, pw;
         if (request->hasParam("ssid")) ss = request->getParam("ssid")->value();
@@ -194,20 +258,17 @@ void startPortal() {
         password = pw;
         state = State::CONNECTING;
         connectAttempts = 1;
-        WiFi.softAPdisconnect(true); // Force AP stop
+        WiFi.mode(WIFI_AP_STA);
         delay(100);
-        WiFi.mode(WIFI_STA); // Must be STA only
-        Serial.printf("[WiFiMgr] Attempting to connect to SSID: %s\n", ss.c_str());
         WiFi.begin(ssid.c_str(), password.c_str());
         request->send(200, "text/plain", "Connecting to: " + ssid);
     });
 
-    // PATCHED /scan endpoint: caches last successful scan
+    // PATCHED /scan endpoint: caches last scan result for reliability
     server.on("/scan", HTTP_GET, [](AsyncWebServerRequest *request){
         int n = WiFi.scanComplete();
         if (n == -2) {
-            WiFi.scanNetworks(true, true); // async, hidden
-            // Serve cached list if available
+            WiFi.scanNetworks(true, true);
             String json = "[";
             for (size_t i = 0; i < lastScanResults.size(); ++i) {
                 if (i) json += ",";
@@ -217,7 +278,6 @@ void startPortal() {
             request->send(200, "application/json", json);
             return;
         } else if (n == -1) {
-            // Scan in progress, serve last scan
             String json = "[";
             for (size_t i = 0; i < lastScanResults.size(); ++i) {
                 if (i) json += ",";
@@ -227,7 +287,6 @@ void startPortal() {
             request->send(200, "application/json", json);
             return;
         }
-        // Scan complete
         lastScanResults.clear();
         for (int i = 0; i < n; ++i) {
             lastScanResults.push_back(WiFi.SSID(i));
@@ -259,6 +318,35 @@ void startPortal() {
         Serial.println("[DEBUG] WiFi credentials cleared via /debug/forget");
         request->send(200, "text/plain", "WiFi credentials cleared (debug).");
     });
+
+    // ---- PATCHED: Proper POST JSON body for ESPAsyncWebServer (Arduino 3.2.0)
+    server.on("/save", HTTP_POST,
+        [](AsyncWebServerRequest *request){},
+        NULL,
+        [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t, size_t) {
+            String body = "";
+            for (size_t i = 0; i < len; i++) body += (char)data[i];
+            // crude parse: {"ssid":"...","pass":"..."}
+            int ssidStart = body.indexOf("\"ssid\":\"") + 8;
+            int ssidEnd   = body.indexOf("\"", ssidStart);
+            int passStart = body.indexOf("\"pass\":\"") + 8;
+            int passEnd   = body.indexOf("\"", passStart);
+            String newSsid = (ssidStart >= 8 && ssidEnd > ssidStart) ? body.substring(ssidStart, ssidEnd) : "";
+            String newPass = (passStart >= 8 && passEnd > passStart) ? body.substring(passStart, passEnd) : "";
+            if (newSsid.length() == 0) {
+                request->send(400, "text/plain", "SSID missing");
+                return;
+            }
+            saveCreds(newSsid, newPass);
+            ssid = newSsid;
+            password = newPass;
+            state = State::CONNECTING;
+            connectAttempts = 1;
+            WiFi.begin(newSsid.c_str(), newPass.c_str());
+            request->send(200, "text/plain", "Connecting to: " + newSsid);
+            Serial.printf("[WiFiMgr] Received new creds. SSID: %s\n", newSsid.c_str());
+        }
+    );
 
     auto cp = [](AsyncWebServerRequest *r){
         r->send(200, "text/html", "<meta http-equiv='refresh' content='0; url=/' />");
@@ -302,8 +390,7 @@ void begin() {
 void loop() {
     dnsServer.processNextRequest();
     if (state == State::CONNECTING) {
-        wl_status_t status = WiFi.status();
-        if (status == WL_CONNECTED) {
+        if (WiFi.status() == WL_CONNECTED) {
             state = State::CONNECTED;
             dnsServer.stop();
             Serial.println("[WiFiMgr] WiFi connected.");
@@ -311,7 +398,6 @@ void loop() {
             Serial.println(WiFi.localIP());
             LedStat::setStatus(LedStatus::WifiConnected);
         } else if (millis() - lastAttempt > retryDelay) {
-            Serial.printf("[WiFiMgr] Not connected, status: %d, retry %d/%d\n", status, connectAttempts, maxAttempts);
             connectAttempts++;
             if (connectAttempts >= maxAttempts) {
                 state = State::PORTAL;
@@ -319,7 +405,6 @@ void loop() {
                 LedStat::setStatus(LedStatus::WifiFailed);
             } else {
                 WiFi.disconnect();
-                delay(100);
                 WiFi.begin(ssid.c_str(), password.c_str());
                 lastAttempt = millis();
             }

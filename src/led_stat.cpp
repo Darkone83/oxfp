@@ -2,8 +2,8 @@
 #include <Arduino.h>
 
 // --- Pin config ---
-#define RGB_PIN 21
-#define RGB_BRIGHTNESS 255 // Reasonable for status; can tweak
+#define RGB_PIN 8
+#define RGB_BRIGHTNESS 75 // Reasonable for status; can tweak
 
 // --- Internal state ---
 static LedStatus currentStatus = LedStatus::Booting;
@@ -14,7 +14,7 @@ extern "C" void neopixelWrite(uint8_t pin, uint8_t r, uint8_t g, uint8_t b);
 
 // Set color using onboard RGB
 static void setLedColor(uint8_t r, uint8_t g, uint8_t b) {
-    neopixelWrite(RGB_PIN, r, g, b);
+    neopixelWrite(RGB_PIN, g, r, b);
 }
 
 void LedStat::begin() {

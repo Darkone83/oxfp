@@ -1,357 +1,554 @@
-#include "oxfp_config.h"
-#include "OXFP_orig.h"
+#include "OXFP_config.h"
 #include <Preferences.h>
+#include "OXFP_orig.h"
 #include <ArduinoJson.h>
-#include <math.h>
 
-// Access the shared NeoPixel object
-extern Adafruit_NeoPixel leds;
+namespace {
+    Preferences prefs;
+    OXFP_Config config;
+    bool inPreview = false;
+    OXFP_Config previewConfig;
+    unsigned long previewTimer = 0;
+    unsigned long lastAnimUpdate = 0;
+    uint8_t animFrame = 0;
 
-// --- HSV to RGB Helper ---
-static uint32_t hsv2rgb(float h, float s, float v) {
-    float r, g, b;
-    int i = int(h * 6);
-    float f = h * 6 - i;
-    float p = v * (1 - s);
-    float q = v * (1 - f * s);
-    float t = v * (1 - (1 - f) * s);
-    switch(i % 6){
-        case 0: r = v, g = t, b = p; break;
-        case 1: r = q, g = v, b = p; break;
-        case 2: r = p, g = v, b = t; break;
-        case 3: r = p, g = q, b = v; break;
-        case 4: r = t, g = p, b = v; break;
-        case 5: r = v, g = p, b = q; break;
+    uint32_t rgbWithBrightness(const OXFP_RGB& c, uint8_t brightness) {
+        return leds.Color(
+            (uint8_t)((c.r * brightness) / 255),
+            (uint8_t)((c.g * brightness) / 255),
+            (uint8_t)((c.b * brightness) / 255)
+        );
     }
-    return leds.Color((uint8_t)(r*255), (uint8_t)(g*255), (uint8_t)(b*255));
 }
 
-// --- Color Palette (RRGGBB hex, 32 entries) ---
-#define COLOR_COUNT 32
-static const uint32_t color_palette[COLOR_COUNT] = {
-    0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0x00FFFF, 0xFF00FF,
-    0x800000, 0x008000, 0x000080, 0x808000, 0x008080, 0x800080, 0x808080, 0xC0C0C0,
-    0xFFA500, 0xA52A2A, 0x008B8B, 0xB8860B, 0x006400, 0x8B008B, 0x556B2F, 0xFF69B4,
-    0x4B0082, 0xB22222, 0x228B22, 0xDAA520, 0x20B2AA, 0x32CD32, 0x4682B4, 0x9ACD32
-};
+void OXFP_config::loadPreferences() {
+    prefs.begin("oxfp", true);
+    config.mode        = (OXFP_Mode)prefs.getUChar("mode", (uint8_t)OXFP_Mode::Stock);
+    config.brightness  = prefs.getUChar("bright", 128);
+    config.greenColor  = { prefs.getUChar("gr",0), prefs.getUChar("gg",255), prefs.getUChar("gb",0) };
+    config.redColor    = { prefs.getUChar("rr",255), prefs.getUChar("rg",0), prefs.getUChar("rb",0) };
+    config.orangeColor = { prefs.getUChar("or",255), prefs.getUChar("og",128), prefs.getUChar("ob",0) };
+    config.animMode    = (OXFP_AnimMode)prefs.getUChar("anim", 0);
+    config.animColorA  = { prefs.getUChar("arA",0), prefs.getUChar("agA",128), prefs.getUChar("abA",255) };
+    config.animColorB  = { prefs.getUChar("arB",255), prefs.getUChar("agB",0), prefs.getUChar("abB",128) };
+    config.animSpeed   = prefs.getUChar("spd", 5);
+    prefs.end();
+}
+void OXFP_config::savePreferences() {
+    prefs.begin("oxfp", false);
+    prefs.putUChar("mode", (uint8_t)config.mode);
+    prefs.putUChar("bright", config.brightness);
+    prefs.putUChar("gr", config.greenColor.r); prefs.putUChar("gg", config.greenColor.g); prefs.putUChar("gb", config.greenColor.b);
+    prefs.putUChar("rr", config.redColor.r);   prefs.putUChar("rg", config.redColor.g);   prefs.putUChar("rb", config.redColor.b);
+    prefs.putUChar("or", config.orangeColor.r); prefs.putUChar("og", config.orangeColor.g); prefs.putUChar("ob", config.orangeColor.b);
+    prefs.putUChar("anim", (uint8_t)config.animMode);
+    prefs.putUChar("arA", config.animColorA.r); prefs.putUChar("agA", config.animColorA.g); prefs.putUChar("abA", config.animColorA.b);
+    prefs.putUChar("arB", config.animColorB.r); prefs.putUChar("agB", config.animColorB.g); prefs.putUChar("abB", config.animColorB.b);
+    prefs.putUChar("spd", config.animSpeed);
+    prefs.end();
+}
+void OXFP_config::resetPreferences() {
+    config = OXFP_Config(); // Uses default values
+    savePreferences();
+}
 
-static const char* animation_names[] = {
-    "Pulse", "Fade", "Rainbow", "Dual Rainbow", "Color Chase", "Sparkle"
-};
+const OXFP_Config& OXFP_config::getConfig() { return config; }
 
-// --- HTML Fragments: File scope ---
-static const char page_head[] PROGMEM = R"rawliteral(
+void OXFP_config::preview(const OXFP_Config& tmp) {
+    inPreview = true;
+    previewConfig = tmp;
+    previewTimer = millis();
+}
+void endPreview() {
+    inPreview = false;
+}
+
+void OXFP_config::applyConfig() {
+    if (inPreview && (millis() - previewTimer > 8000)) {
+        endPreview();
+    }
+
+if (inPreview) {
+    OXFP_orig::ledCustomOverride([]{
+        const auto& c = previewConfig;
+        unsigned long now = millis();
+        uint8_t s = c.animSpeed ? c.animSpeed : 1;
+        uint32_t cA = rgbWithBrightness(c.animColorA, c.brightness);
+        uint32_t cB = rgbWithBrightness(c.animColorB, c.brightness);
+        switch (c.mode) {
+            case OXFP_Mode::Static:
+                leds.setPixelColor(0, cA);
+                leds.setPixelColor(1, cB);
+                leds.show();
+                break;
+            case OXFP_Mode::Animation:
+                switch (c.animMode) {
+                    case OXFP_AnimMode::ColorBounce: {
+                        if (now - lastAnimUpdate > (400 / s)) {
+                            animFrame ^= 1;
+                            lastAnimUpdate = now;
+                        }
+                        leds.setPixelColor(animFrame, cA);
+                        leds.setPixelColor(!animFrame, cB);
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::Breathing: {
+                        if (now - lastAnimUpdate > 16) {
+                            lastAnimUpdate = now;
+                            animFrame++;
+                        }
+                        float b = (sin(animFrame / 12.0f) + 1.0f) * 0.5f;
+                        uint8_t bright = (uint8_t)(c.brightness * b);
+                        leds.setPixelColor(0, rgbWithBrightness(c.animColorA, bright));
+                        leds.setPixelColor(1, rgbWithBrightness(c.animColorB, bright));
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::Chase: {
+                        if (now - lastAnimUpdate > (200 / s)) {
+                            animFrame = (animFrame+1) % 2;
+                            lastAnimUpdate = now;
+                        }
+                        leds.setPixelColor(animFrame, cA);
+                        leds.setPixelColor(!animFrame, cB);
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::RGBFade: {
+                        if (now - lastAnimUpdate > (16 * (11 - s))) {
+                            animFrame++;
+                            lastAnimUpdate = now;
+                        }
+                        float x = (animFrame % 128) / 128.0f;
+                        uint8_t r = (uint8_t)(sin(PI*2*x)*127+128);
+                        uint8_t g = (uint8_t)(sin(PI*2*x + 2.09)*127+128);
+                        uint8_t b = (uint8_t)(sin(PI*2*x + 4.19)*127+128);
+                        uint32_t col = rgbWithBrightness({r,g,b}, c.brightness);
+                        leds.setPixelColor(0, col);
+                        leds.setPixelColor(1, col);
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::Blinking: {
+                        if (now - lastAnimUpdate > (400 / s)) {
+                            animFrame ^= 1;
+                            lastAnimUpdate = now;
+                        }
+                        uint32_t cAon = animFrame ? cA : 0;
+                        uint32_t cBon = animFrame ? cB : 0;
+                        leds.setPixelColor(0, cAon);
+                        leds.setPixelColor(1, cBon);
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::Alternating: {
+                        if (now - lastAnimUpdate > (350 / s)) {
+                            animFrame ^= 1;
+                            lastAnimUpdate = now;
+                        }
+                        leds.setPixelColor(animFrame, cA);
+                        leds.setPixelColor(!animFrame, cB);
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::FireFlicker: {
+                        if (now - lastAnimUpdate > 70) {
+                            lastAnimUpdate = now;
+                            uint8_t r1 = 180 + (rand() % 75);
+                            uint8_t g1 = 50 + (rand() % 60);
+                            uint8_t b1 = rand() % 16;
+                            uint8_t r2 = 180 + (rand() % 75);
+                            uint8_t g2 = 50 + (rand() % 60);
+                            uint8_t b2 = rand() % 16;
+                            leds.setPixelColor(0, rgbWithBrightness({r1,g1,b1}, c.brightness));
+                            leds.setPixelColor(1, rgbWithBrightness({r2,g2,b2}, c.brightness));
+                            leds.show();
+                        }
+                        break;
+                    }
+                    default: break;
+                }
+                break;
+            case OXFP_Mode::Stock:
+            default:
+                // fallback to nothing
+                break;
+        }
+    });
+    return;
+}
+    switch (config.mode) {
+        case OXFP_Mode::Stock:
+            OXFP_orig::ledCustomOverride(nullptr);
+            break;
+        case OXFP_Mode::Static:
+            OXFP_orig::ledCustomOverride([]{
+                uint32_t col = rgbWithBrightness(config.greenColor, config.brightness);
+                leds.setPixelColor(0, col);
+                leds.setPixelColor(1, col);
+                leds.show();
+            });
+            break;
+        case OXFP_Mode::Animation:
+            OXFP_orig::ledCustomOverride([]{
+                unsigned long now = millis();
+                uint8_t s = config.animSpeed ? config.animSpeed : 1;
+                uint32_t cA = rgbWithBrightness(config.animColorA, config.brightness);
+                uint32_t cB = rgbWithBrightness(config.animColorB, config.brightness);
+                switch (config.animMode) {
+                    case OXFP_AnimMode::ColorBounce: {
+                        if (now - lastAnimUpdate > (400 / s)) {
+                            animFrame ^= 1;
+                            lastAnimUpdate = now;
+                        }
+                        leds.setPixelColor(animFrame, cA);
+                        leds.setPixelColor(!animFrame, cB);
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::Breathing: {
+                        if (now - lastAnimUpdate > 16) {
+                            lastAnimUpdate = now;
+                            animFrame++;
+                        }
+                        float b = (sin(animFrame / 12.0f) + 1.0f) * 0.5f;
+                        uint8_t bright = (uint8_t)(config.brightness * b);
+                        leds.setPixelColor(0, rgbWithBrightness(config.animColorA, bright));
+                        leds.setPixelColor(1, rgbWithBrightness(config.animColorB, bright));
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::Chase: {
+                        if (now - lastAnimUpdate > (200 / s)) {
+                            animFrame = (animFrame+1) % 2;
+                            lastAnimUpdate = now;
+                        }
+                        leds.setPixelColor(animFrame, cA);
+                        leds.setPixelColor(!animFrame, cB);
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::RGBFade: {
+                        if (now - lastAnimUpdate > (16 * (11 - s))) {
+                            animFrame++;
+                            lastAnimUpdate = now;
+                        }
+                        float x = (animFrame % 128) / 128.0f;
+                        uint8_t r = (uint8_t)(sin(PI*2*x)*127+128);
+                        uint8_t g = (uint8_t)(sin(PI*2*x + 2.09)*127+128);
+                        uint8_t b = (uint8_t)(sin(PI*2*x + 4.19)*127+128);
+                        uint32_t col = rgbWithBrightness({r,g,b}, config.brightness);
+                        leds.setPixelColor(0, col);
+                        leds.setPixelColor(1, col);
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::Blinking: {
+                        if (now - lastAnimUpdate > (400 / s)) {
+                            animFrame ^= 1;
+                            lastAnimUpdate = now;
+                        }
+                        uint32_t cAon = animFrame ? cA : 0;
+                        uint32_t cBon = animFrame ? cB : 0;
+                        leds.setPixelColor(0, cAon);
+                        leds.setPixelColor(1, cBon);
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::Alternating: {
+                        if (now - lastAnimUpdate > (350 / s)) {
+                            animFrame ^= 1;
+                            lastAnimUpdate = now;
+                        }
+                        leds.setPixelColor(animFrame, cA);
+                        leds.setPixelColor(!animFrame, cB);
+                        leds.show();
+                        break;
+                    }
+                    case OXFP_AnimMode::FireFlicker: {
+                        if (now - lastAnimUpdate > 70) {
+                            lastAnimUpdate = now;
+                            uint8_t r1 = 180 + (rand() % 75);
+                            uint8_t g1 = 50 + (rand() % 60);
+                            uint8_t b1 = rand() % 16;
+                            uint8_t r2 = 180 + (rand() % 75);
+                            uint8_t g2 = 50 + (rand() % 60);
+                            uint8_t b2 = rand() % 16;
+                            leds.setPixelColor(0, rgbWithBrightness({r1,g1,b1}, config.brightness));
+                            leds.setPixelColor(1, rgbWithBrightness({r2,g2,b2}, config.brightness));
+                            leds.show();
+                        }
+                        break;
+                    }
+                    default: break;
+                }
+            });
+            break;
+    }
+}
+
+static String configToJson(const OXFP_Config& c) {
+    StaticJsonDocument<384> doc;
+    doc["mode"] = (uint8_t)c.mode;
+    doc["brightness"] = c.brightness;
+
+    JsonArray greenArr = doc.createNestedArray("greenColor");
+    greenArr.add(c.greenColor.r);
+    greenArr.add(c.greenColor.g);
+    greenArr.add(c.greenColor.b);
+
+    JsonArray redArr = doc.createNestedArray("redColor");
+    redArr.add(c.redColor.r);
+    redArr.add(c.redColor.g);
+    redArr.add(c.redColor.b);
+
+    JsonArray orangeArr = doc.createNestedArray("orangeColor");
+    orangeArr.add(c.orangeColor.r);
+    orangeArr.add(c.orangeColor.g);
+    orangeArr.add(c.orangeColor.b);
+
+    doc["animMode"] = (uint8_t)c.animMode;
+    JsonArray animArrA = doc.createNestedArray("animColorA");
+    animArrA.add(c.animColorA.r);
+    animArrA.add(c.animColorA.g);
+    animArrA.add(c.animColorA.b);
+
+    JsonArray animArrB = doc.createNestedArray("animColorB");
+    animArrB.add(c.animColorB.r);
+    animArrB.add(c.animColorB.g);
+    animArrB.add(c.animColorB.b);
+
+    doc["animSpeed"] = c.animSpeed;
+    String out;
+    serializeJson(doc, out);
+    return out;
+}
+
+void OXFP_config::begin(AsyncWebServer& server) {
+    server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request){
+        String html = R"rawliteral(
 <!DOCTYPE html>
-<html><head>
-<title>OXFP Config</title>
-<meta name="viewport" content="width=400">
-<style>
-body { background: #111; color: #eee; font-family: sans-serif; }
-h2 { color: #3c8d1a; }
-.colgrid { display: grid; grid-template-columns: repeat(8, 28px); gap: 4px; }
-.colbtn { width: 28px; height: 28px; border: 2px solid #333; border-radius: 6px; cursor: pointer; }
-.sel { border-color: #fff !important; }
-input[type=range] { width:180px; }
-</style>
+<html>
+<head>
+    <title>OXFP LED Config</title>
+    <meta name="viewport" content="width=320,initial-scale=1">
+    <style>
+        body {background:#111;color:#EEE;font-family:sans-serif;}
+        .container {max-width:340px;margin:24px auto;background:#222;padding:2em;border-radius:8px;box-shadow:0 0 16px #0008;}
+        h2 {margin-bottom:1em;}
+        label {display:block;margin-top:.5em;margin-bottom:.1em;}
+        input[type=color],input[type=range] {vertical-align:middle;}
+        select,button,input {margin:.6em 0;padding:.4em;border-radius:6px;border:1px solid #444;}
+        .btn-primary {background:#299a2c;color:white;}
+        .btn-reset {background:#a22;color:white;}
+        .btn-preview {background:#265aa5;color:white;}
+        .row {margin-bottom:1em;}
+    </style>
 </head>
 <body>
-<h2>OXFP Front Panel LED Config</h2>
-<b>Brightness:</b>
-<input type="range" min="8" max="255" value="255" id="bright" style="width:180px;">
-<span id="bright_val">255</span>
-<br><br>
-Mode: 
-<select id="mode">
-  <option value="0">Static</option>
-  <option value="1">Animation</option>
-</select><br><br>
-<div id="static_cfg">
-  <b>Static Colors</b><br>
-  <b>Right LED:</b><br>
-  Red <div class="colgrid" id="rr"></div>
-  Green <div class="colgrid" id="rg"></div>
-  Orange <div class="colgrid" id="ro"></div>
-  <br>
-  <b>Left LED:</b><br>
-  Red <div class="colgrid" id="lr"></div>
-  Green <div class="colgrid" id="lg"></div>
-  Orange <div class="colgrid" id="lo"></div>
-</div>
-<div id="anim_cfg" style="display:none">
-  <b>Animation:</b>
-  <select id="anim_id">
-)rawliteral";
-
-static const char page_mid[] PROGMEM = R"rawliteral(
-</select><br>
-  <div id="anim_colors"></div>
-</div>
-<br>
-<button onclick="saveCfg()">Save</button>
-<span id="stat"></span>
+    <div class="container">
+        <h2>OXFP LED Configuration</h2>
+        <form id="configForm">
+            <label>Mode:</label>
+            <select id="mode" onchange="updateVisibility()">
+                <option value="0">Stock</option>
+                <option value="1">Static</option>
+                <option value="2">Animation</option>
+            </select>
+            <div class="row">
+                <label>Brightness:</label>
+                <input type="range" id="brightness" min="1" max="255" value="128" oninput="bval.innerText=this.value">
+                <span id="bval">128</span>
+            </div>
+            <div id="staticBlock" style="display:none">
+                <label>Green Color:</label>
+                <input type="color" id="greenColor">
+                <label>Red Color:</label>
+                <input type="color" id="redColor">
+                <label>Orange Color:</label>
+                <input type="color" id="orangeColor">
+            </div>
+            <div id="animBlock" style="display:none">
+                <label>Animation:</label>
+                <select id="animMode" onchange="updateAnimUI()">
+                    <option value="0">Color Bounce</option>
+                    <option value="1">Breathing/Pulse</option>
+                    <option value="2">Chase</option>
+                    <option value="3">RGB Fade</option>
+                    <option value="4">Blinking</option>
+                    <option value="5">Alternating</option>
+                    <option value="6">Fire/Flicker</option>
+                </select>
+                <div id="animColorBlockA">
+                    <label>Animation Color LED 0:</label>
+                    <input type="color" id="animColorA">
+                </div>
+                <div id="animColorBlockB">
+                    <label>Animation Color LED 1:</label>
+                    <input type="color" id="animColorB">
+                </div>
+                <div id="animSpeedBlock">
+                    <label>Speed:</label>
+                    <input type="range" id="animSpeed" min="1" max="10" value="5" oninput="aval.innerText=this.value">
+                    <span id="aval">5</span>
+                </div>
+            </div>
+            <div class="row">
+                <button type="button" class="btn-preview" onclick="previewConfig()">Preview</button>
+                <button type="button" class="btn-primary" onclick="saveConfig()">Save</button>
+                <button type="button" class="btn-reset" onclick="resetConfig()">Reset</button>
+            </div>
+        </form>
+        <div id="status"></div>
+    </div>
 <script>
-const palette = [
-'#000','#fff','#f00','#0f0','#00f','#ff0','#0ff','#f0f','#800','#080','#008','#880','#088','#808','#888','#ccc',
-'#fa0','#a52','#088','#b86','#064','#808','#556','#f6b','#4b0','#b22','#282','#da2','#2ba','#2c2','#468','#9c2'
-];
-let cur = {};
-const animColorNeeds = [
-    [1,0], [1,0], [0,0], [0,0], [1,1], [1,1]
-];
-function fillGrid(id, sel) {
-  let div = document.getElementById(id);
-  div.innerHTML = '';
-  for(let i=0;i<palette.length;i++) {
-    let b = document.createElement('div');
-    b.className = "colbtn" + (sel==i?" sel":"");
-    b.style.background = palette[i];
-    b.onclick = ()=>{ cur[id]=i; fillGrid(id,i); };
-    div.appendChild(b);
-  }
+let config = {};
+function rgb2hex(r,g,b){return "#"+((1<<24)|(r<<16)|(g<<8)|b).toString(16).slice(1);}
+function hex2rgb(hex){let n=parseInt(hex.slice(1),16);return [n>>16&255,n>>8&255,n&255];}
+
+function updateVisibility() {
+    let mode = +document.getElementById('mode').value;
+    document.getElementById('staticBlock').style.display = (mode==1) ? '' : 'none';
+    document.getElementById('animBlock').style.display = (mode==2) ? '' : 'none';
 }
-function showAnimColorPickers(anim_id) {
-    let html = "";
-    if (animColorNeeds[anim_id][0]) {
-        html += 'Main Color <div class="colgrid" id="animcol_a"></div>';
-    }
-    if (animColorNeeds[anim_id][1]) {
-        html += 'Second Color <div class="colgrid" id="animcol_b"></div>';
-    }
-    document.getElementById('anim_colors').innerHTML = html;
-    if (animColorNeeds[anim_id][0]) fillGrid('animcol_a', cur.animcol_a);
-    if (animColorNeeds[anim_id][1]) fillGrid('animcol_b', cur.animcol_b);
+function updateAnimUI() {
+    let anim = +document.getElementById('animMode').value;
+    // Show/hide color pickers and speed slider as needed
+    let showColors = ![3,6].includes(anim);
+    document.getElementById('animColorBlockA').style.display = showColors ? '' : 'none';
+    document.getElementById('animColorBlockB').style.display = showColors ? '' : 'none';
+    document.getElementById('animSpeedBlock').style.display = (anim==6) ? 'none' : '';
 }
-function updateUI() {
-  document.getElementById('mode').value = cur.mode;
-  fillGrid('rr', cur.rr); fillGrid('rg', cur.rg); fillGrid('ro', cur.ro);
-  fillGrid('lr', cur.lr); fillGrid('lg', cur.lg); fillGrid('lo', cur.lo);
-  document.getElementById('bright').value = cur.brightness || 255;
-  document.getElementById('bright_val').innerText = cur.brightness || 255;
-  document.getElementById('static_cfg').style.display = cur.mode==0?"block":"none";
-  document.getElementById('anim_cfg').style.display = cur.mode==1?"block":"none";
-  if (cur.mode==1) showAnimColorPickers(cur.anim_id);
+function fillForm() {
+    document.getElementById('mode').value = config.mode;
+    document.getElementById('brightness').value = config.brightness;
+    bval.innerText = config.brightness;
+    document.getElementById('greenColor').value = rgb2hex(...config.greenColor);
+    document.getElementById('redColor').value = rgb2hex(...config.redColor);
+    document.getElementById('orangeColor').value = rgb2hex(...config.orangeColor);
+    document.getElementById('animMode').value = config.animMode;
+    document.getElementById('animColorA').value = rgb2hex(...config.animColorA);
+    document.getElementById('animColorB').value = rgb2hex(...config.animColorB);
+    document.getElementById('animSpeed').value = config.animSpeed;
+    aval.innerText = config.animSpeed;
+    updateVisibility();
+    updateAnimUI();
 }
-function loadCfg() {
-  fetch('/config/settings').then(r=>r.json()).then(js=>{
-    cur = js;
-    updateUI();
-  });
+function fetchConfig() {
+    fetch('/api/ledconfig').then(r=>r.json()).then(j=>{
+        config=j;
+        fillForm();
+    });
 }
-function saveCfg() {
-  cur.mode = +document.getElementById('mode').value;
-  cur.anim_id = +document.getElementById('anim_id').value;
-  cur.brightness = +document.getElementById('bright').value;
-  if (document.getElementById('animcol_a')) cur.animcol_a = cur.animcol_a || 0;
-  if (document.getElementById('animcol_b')) cur.animcol_b = cur.animcol_b || 0;
-  fetch('/config/settings', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(cur)
-  }).then(r=>r.text()).then(t=>{
-    document.getElementById('stat').innerText = "Saved!";
-  });
+function gatherConfig() {
+    let c = {
+        mode:+document.getElementById('mode').value,
+        brightness:+document.getElementById('brightness').value,
+        greenColor: hex2rgb(document.getElementById('greenColor').value),
+        redColor: hex2rgb(document.getElementById('redColor').value),
+        orangeColor: hex2rgb(document.getElementById('orangeColor').value),
+        animMode:+document.getElementById('animMode').value,
+        animColorA: hex2rgb(document.getElementById('animColorA').value),
+        animColorB: hex2rgb(document.getElementById('animColorB').value),
+        animSpeed:+document.getElementById('animSpeed').value
+    };
+    return c;
 }
-document.getElementById('bright').oninput = function() {
-    document.getElementById('bright_val').innerText = this.value;
-    cur.brightness = +this.value;
-};
-document.getElementById('mode').onchange = updateUI;
-document.getElementById('anim_id').onchange = ()=>{
-    cur.anim_id = +document.getElementById('anim_id').value;
-    showAnimColorPickers(cur.anim_id);
-};
-window.onload = loadCfg;
+function previewConfig() {
+    let c = gatherConfig();
+    fetch('/api/ledpreview', {
+        method:'POST',
+        headers: {'Content-Type':'application/json'},
+        body:JSON.stringify(c)
+    });
+}
+function saveConfig() {
+    let c = gatherConfig();
+    fetch('/api/ledsave', {
+        method:'POST',
+        headers: {'Content-Type':'application/json'},
+        body:JSON.stringify(c)
+    }).then(r=>r.text()).then(t=>{
+        document.getElementById('status').innerText=t;
+        setTimeout(()=>document.getElementById('status').innerText='', 1500);
+        fetchConfig();
+    });
+}
+function resetConfig() {
+    fetch('/api/ledreset', {method:'POST'}).then(()=>fetchConfig());
+}
+fetchConfig();
 </script>
 </body>
 </html>
-)rawliteral";
-
-// --- Settings ---
-static OXFP_config::Settings settings;
-static Preferences prefs;
-
-// --- Save/Load Settings ---
-void saveSettings() {
-    prefs.begin("oxfp_cfg", false);
-    prefs.putBytes("settings", &settings, sizeof(settings));
-    prefs.end();
-}
-void loadSettings() {
-    prefs.begin("oxfp_cfg", true);
-    if (prefs.isKey("settings")) {
-        prefs.getBytes("settings", &settings, sizeof(settings));
-        if (settings.brightness < 8 || settings.brightness > 255) settings.brightness = 255;
-    } else {
-        settings = {
-            OXFP_config::Static,
-            2, 3, 16,   // right: red, green, orange (palette idx)
-            2, 3, 16,   // left:  red, green, orange
-            0, 3, 4,    // animation_id, color_a, color_b
-            255         // brightness
-        };
-    }
-    prefs.end();
-}
-
-namespace OXFP_config {
-
-static bool handlerActive = false;
-static void animationHandler();
-
-void setSettings(const Settings& s) {
-    settings = s;
-    saveSettings();
-}
-const Settings& getSettings() { return settings; }
-
-bool isActive() {
-    return (settings.mode == Animation);
-}
-
-void begin(AsyncWebServer& server) {
-    loadSettings();
-
-    // --- Web UI ---
-    server.on("/config", HTTP_GET, [](AsyncWebServerRequest* req){
-        String animOpts;
-        for (int i = 0; i < AnimationCount; ++i) {
-            animOpts += "<option value='" + String(i) + "'";
-            if (i == settings.animation_id) animOpts += " selected";
-            animOpts += ">" + String(animation_names[i]) + "</option>\n";
-        }
-        String page = String(page_head) + animOpts + String(page_mid);
-        req->send(200, "text/html", page);
+        )rawliteral";
+        request->send(200, "text/html", html);
     });
 
-    server.on("/config/colors", HTTP_GET, [](AsyncWebServerRequest* req){
-        String js = "[";
-        for (int i = 0; i < COLOR_COUNT; ++i) {
-            if (i) js += ",";
-            char buf[8];
-            sprintf(buf, "\"#%06x\"", color_palette[i]);
-            js += buf;
-        }
-        js += "]";
-        req->send(200, "application/json", js);
+    server.on("/api/ledconfig", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "application/json", configToJson(config));
     });
 
-    server.on("/config/settings", HTTP_GET, [](AsyncWebServerRequest* req){
-        DynamicJsonDocument doc(512);
-        doc["mode"] = settings.mode;
-        doc["rr"] = settings.static_right_red;
-        doc["rg"] = settings.static_right_green;
-        doc["ro"] = settings.static_right_orange;
-        doc["lr"] = settings.static_left_red;
-        doc["lg"] = settings.static_left_green;
-        doc["lo"] = settings.static_left_orange;
-        doc["anim_id"] = settings.animation_id;
-        doc["animcol_a"] = settings.animation_color_a;
-        doc["animcol_b"] = settings.animation_color_b;
-        doc["brightness"] = settings.brightness;
-        String out;
-        serializeJson(doc, out);
-        req->send(200, "application/json", out);
+    server.on(
+        "/api/ledpreview", HTTP_POST,
+        [](AsyncWebServerRequest *request){},
+        NULL,
+        [](AsyncWebServerRequest *request, uint8_t* data, size_t len, size_t, size_t){
+            StaticJsonDocument<384> doc;
+            deserializeJson(doc, data, len);
+            OXFP_Config tmp;
+            tmp.mode = (OXFP_Mode)doc["mode"].as<uint8_t>();
+            tmp.brightness = doc["brightness"].as<uint8_t>();
+            auto arr = doc["greenColor"].as<JsonArray>();
+            tmp.greenColor = { arr[0], arr[1], arr[2] };
+            arr = doc["redColor"].as<JsonArray>();
+            tmp.redColor = { arr[0], arr[1], arr[2] };
+            arr = doc["orangeColor"].as<JsonArray>();
+            tmp.orangeColor = { arr[0], arr[1], arr[2] };
+            tmp.animMode = (OXFP_AnimMode)doc["animMode"].as<uint8_t>();
+            auto arrA = doc["animColorA"].as<JsonArray>();
+            tmp.animColorA = { arrA[0], arrA[1], arrA[2] };
+            auto arrB = doc["animColorB"].as<JsonArray>();
+            tmp.animColorB = { arrB[0], arrB[1], arrB[2] };
+            tmp.animSpeed = doc["animSpeed"].as<uint8_t>();
+            OXFP_config::preview(tmp);
+            request->send(200, "text/plain", "Previewing");
+        }
+    );
+
+    server.on(
+        "/api/ledsave", HTTP_POST,
+        [](AsyncWebServerRequest *request){},
+        NULL,
+        [](AsyncWebServerRequest *request, uint8_t* data, size_t len, size_t, size_t){
+            StaticJsonDocument<384> doc;
+            deserializeJson(doc, data, len);
+            config.mode = (OXFP_Mode)doc["mode"].as<uint8_t>();
+            config.brightness = doc["brightness"].as<uint8_t>();
+            auto arr = doc["greenColor"].as<JsonArray>();
+            config.greenColor = { arr[0], arr[1], arr[2] };
+            arr = doc["redColor"].as<JsonArray>();
+            config.redColor = { arr[0], arr[1], arr[2] };
+            arr = doc["orangeColor"].as<JsonArray>();
+            config.orangeColor = { arr[0], arr[1], arr[2] };
+            config.animMode = (OXFP_AnimMode)doc["animMode"].as<uint8_t>();
+            auto arrA = doc["animColorA"].as<JsonArray>();
+            config.animColorA = { arrA[0], arrA[1], arrA[2] };
+            auto arrB = doc["animColorB"].as<JsonArray>();
+            config.animColorB = { arrB[0], arrB[1], arrB[2] };
+            config.animSpeed = doc["animSpeed"].as<uint8_t>();
+            OXFP_config::savePreferences();
+            inPreview = false;
+            OXFP_config::applyConfig();
+            request->send(200, "text/plain", "Config saved!");
+        }
+    );
+
+    server.on("/api/ledreset", HTTP_POST, [](AsyncWebServerRequest *request){
+        OXFP_config::resetPreferences();
+        inPreview = false;
+        OXFP_config::applyConfig();
+        request->send(200, "text/plain", "Reset to defaults.");
     });
-
-    server.on("/config/settings", HTTP_POST, [](AsyncWebServerRequest* req){
-        if (req->hasArg("plain")) {
-            String body = req->arg("plain");
-            DynamicJsonDocument doc(512);
-            deserializeJson(doc, body);
-            settings.mode = (OXFP_config::Mode)doc["mode"].as<uint8_t>();
-            settings.static_right_red = doc["rr"];
-            settings.static_right_green = doc["rg"];
-            settings.static_right_orange = doc["ro"];
-            settings.static_left_red = doc["lr"];
-            settings.static_left_green = doc["lg"];
-            settings.static_left_orange = doc["lo"];
-            settings.animation_id = doc["anim_id"];
-            settings.animation_color_a = doc["animcol_a"];
-            settings.animation_color_b = doc["animcol_b"];
-            settings.brightness = doc["brightness"] | 255;
-            saveSettings();
-            req->send(200, "text/plain", "OK");
-        } else {
-            req->send(400, "text/plain", "Missing body");
-        }
-    });
 }
-
-// --- Animation handler: runs when config mode is active ---
-static void animationHandler() {
-    static uint32_t last_anim_ms = 0;
-    static int anim_phase = 0;
-    uint32_t now = millis();
-
-    leds.setBrightness(settings.brightness);
-
-    switch (settings.animation_id) {
-        case Pulse: {
-            float bright = (sin(now / 400.0f) + 1.0f) * 0.5f; // 0..1
-            uint32_t c = color_palette[settings.animation_color_a];
-            uint8_t r = ((c >> 16) & 0xFF) * bright;
-            uint8_t g = ((c >> 8) & 0xFF) * bright;
-            uint8_t b = (c & 0xFF) * bright;
-            leds.setPixelColor(0, leds.Color(r, g, b));
-            leds.setPixelColor(1, leds.Color(r, g, b));
-            break;
-        }
-        case Fade: {
-            float phase = fmod(now / 1000.0f, 1.0f);
-            float bright = phase < 0.5f ? phase * 2 : (1.0f - phase) * 2;
-            uint32_t c = color_palette[settings.animation_color_a];
-            uint8_t r = ((c >> 16) & 0xFF) * bright;
-            uint8_t g = ((c >> 8) & 0xFF) * bright;
-            uint8_t b = (c & 0xFF) * bright;
-            leds.setPixelColor(0, leds.Color(r, g, b));
-            leds.setPixelColor(1, leds.Color(r, g, b));
-            break;
-        }
-        case Rainbow: {
-            float h = fmod(now / 6000.0f, 1.0f);
-            uint32_t rgb = hsv2rgb(h, 1.0, 1.0);
-            leds.setPixelColor(0, rgb);
-            leds.setPixelColor(1, rgb);
-            break;
-        }
-        case DualRainbow: {
-            float h0 = fmod(now / 6000.0f, 1.0f);
-            float h1 = fmod((now / 6000.0f) + 0.5f, 1.0f);
-            leds.setPixelColor(0, hsv2rgb(h0, 1.0, 1.0));
-            leds.setPixelColor(1, hsv2rgb(h1, 1.0, 1.0));
-            break;
-        }
-        case ColorChase: {
-            if (now - last_anim_ms > 300) {
-                last_anim_ms = now;
-                anim_phase = !anim_phase;
-            }
-            uint32_t ca = color_palette[settings.animation_color_a];
-            uint32_t cb = color_palette[settings.animation_color_b];
-            leds.setPixelColor(anim_phase ? 0 : 1, ca);
-            leds.setPixelColor(anim_phase ? 1 : 0, cb);
-            break;
-        }
-        case Sparkle: {
-            uint32_t ca = color_palette[settings.animation_color_a];
-            uint32_t cb = color_palette[settings.animation_color_b];
-            leds.setPixelColor(0, (random(3)==0) ? ca : (random(3)==1 ? cb : 0));
-            leds.setPixelColor(1, (random(3)==0) ? ca : (random(3)==1 ? cb : 0));
-            break;
-        }
-    }
-    leds.show();
-}
-
-void loop() {
-    // Activate/deactivate animation handler as needed
-    bool shouldBeActive = (settings.mode == Animation);
-    if (shouldBeActive && !handlerActive) {
-        OXFP_orig::setCustomHandler(animationHandler);
-        handlerActive = true;
-    } else if (!shouldBeActive && handlerActive) {
-        OXFP_orig::setCustomHandler(nullptr); // back to stock logic
-        handlerActive = false;
-    }
-}
-
-} // namespace OXFP_config
