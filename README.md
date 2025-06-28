@@ -4,7 +4,7 @@
   <img src="https://github.com/Darkone83/oxfp/blob/main/images/DC%20logo.png">
 </div>
 
-OXFP is a highly flexible RGB controller for the original Xbox front panel, supporting original LED status mirroring, full color override, and advanced animations. It is designed for the ESP32 platform and includes a built-in WiFi configuration portal and web-based RGB control.
+OXFP is a highly flexible RGB controller for the original Xbox front panel, supporting original LED status mirroring, static color override, per-LED color animation, and advanced web-based configuration. It is designed for the ESP32 platform and includes a WiFi setup portal and a rich web UI for real-time preview and editing.
 
 <div align=center>
   <img src="https://github.com/Darkone83/oxfp/blob/main/images/Render_Front.png" height=300 width=300><img src="https://github.com/Darkone83/oxfp/blob/main/images/Render_Back.png" height=300 width=300>
@@ -13,23 +13,27 @@ OXFP is a highly flexible RGB controller for the original Xbox front panel, supp
 ## Features
 
 - **Original Xbox LED Logic:**  
-  By default, WS2812 RGB LEDs mimic the classic left/right Xbox front panel status indicators using the original input pins.
+  By default, WS2812 RGB LEDs perfectly mirror the classic left/right Xbox front panel indicators, using the original status inputs.
 
-- **WiFi-Enabled Configuration Portal:**  
-  Connect your device to WiFi and access a full-featured web UI for LED mode selection, color customization, and animation control.
+- **WiFi Configuration Portal:**  
+  Easily connect your device to WiFi and access a web-based UI for mode selection, per-LED color customization, and live animation preview.
 
-- **Static RGB Override:**  
-  Override default Xbox logic with custom color mapping for each indicator (Red, Green, Orange) on both LEDs.
+- **Per-LED Static RGB Override:**  
+  Override the default Xbox logic with custom color mapping for Red, Green, and Orange states on both LEDs.
 
-- **Animation Modes:**  
-  Select from multiple dynamic RGB effects with user-selectable colors and global brightness.
+- **Advanced Animation Modes:**  
+  Select from 7 dynamic RGB effects, each with customizable per-LED colors (where applicable) and adjustable speed.
 
 - **Global Brightness Control:**  
-  Adjust overall LED brightness from the web UI.
+  Adjust the overall LED brightness live from the web interface.
 
 - **Settings Persistence:**  
-  All user settings are saved in flash and recalled automatically on boot.
+  All settings (including colors, animation, brightness, and speed) are saved to flash and recalled on every boot.
 
+- **Live Preview:**  
+  Instantly preview any configuration or animation on the front panel before saving.
+
+---
 
 ## Required Libraries
 
@@ -42,10 +46,13 @@ Install these libraries via the Arduino Library Manager:
 - [ArduinoJson](https://arduinojson.org/)
 - [Preferences](https://github.com/espressif/arduino-esp32/tree/master/libraries/Preferences)
 
+---
 
 ## Hardware Connections
 
-You will need to remove the connector from your original Xbox front panel connector and solder to the OXFP. then you will need to run a spare 5V wire to the 5V pad
+You will need to remove the connector from your original Xbox front panel and solder to the OXFP board. A separate 5V wire must be run to the 5V pad to power the WS2812 LEDs.
+
+---
 
 ## Setup & Usage
 
@@ -54,60 +61,83 @@ You will need to remove the connector from your original Xbox front panel connec
 - Open the project in Arduino IDE.
 - Install all required libraries (see above).
 - Select your ESP32 board and correct COM port.
-- Flash as usual.
+- Upload the firmware.
 
 ### 2. **WiFi Configuration**
 
-- On first boot, the device starts in **WiFi Access Point mode** as `OXFP Setup`.
-- Connect to this WiFi with your phone or computer.
-- The captive portal or [http://192.168.4.1](http://192.168.4.1) will let you join your main WiFi network.
+- On first boot, the device starts in **WiFi Access Point mode** named `OXFP Setup`.
+- Connect via your phone or computer.
+- The captive portal or [http://192.168.4.1](http://192.168.4.1) allows you to join your home WiFi.
 
 ### 3. **Access the Web UI**
 
-- Once connected to WiFi, find the device’s IP address (check your router or serial output).
-- Or, just open [http://oxfp.local](http://oxfp.local) (mDNS).
-- Visit `/config` (e.g. [http://oxfp.local/config](http://oxfp.local/config)).
+- Once connected, find the device’s IP address (via router or serial output).
+- Or, just use [http://oxfp.local](http://oxfp.local) (mDNS enabled).
+- Open [http://oxfp.local/config](http://oxfp.local/config) for full LED control.
 
 ### 4. **Web Configuration UI**
 
-- Set **global brightness** with the slider.
-- Select **Mode:**
-    - **Static**: Custom RGB mapping for each Xbox status color (Red, Green, Orange) on both LEDs.
-    - **Animation**: Select from several effects. User colors (where applicable) and brightness are used.
-- Click **Save** to apply and persist settings.
+- **Set brightness** with the slider.
+- **Select Mode:**
+    - **Stock**: Xbox-original status logic (Green/Red/Orange).
+    - **Static**: Custom RGB mapping for each status (Red, Green, Orange). Both LEDs set together.
+    - **Animation**: Select from 7 dynamic effects. Each effect allows per-LED color selection (if applicable), speed adjustment, and brightness.
+- **Live Preview:**  
+  Preview any combination of settings and animation instantly.
+- **Save:**  
+  Applies and persists your settings to flash.
+- **Reset:**  
+  Restores all options to factory defaults.
 
+---
 
 ## Modes Overview
 
 ### **1. Stock (Original) Mode**
-- LEDs follow Xbox panel logic:
-    - Green = console on/ready, Red = error, Orange = warning (just like stock hardware).
+- LEDs follow Xbox front panel status:
+    - Green = console ready/on, Red = error, Orange = warning (matches hardware).
 
 ### **2. Static Override**
-- LEDs ignore Xbox inputs and always display user-chosen colors for Red, Green, and Orange states (for both left and right LEDs).
+- LEDs ignore Xbox inputs and always display your chosen colors for Red, Green, and Orange states (both LEDs).
 
 ### **3. Animation Modes**
 
-- **Pulse**: Both LEDs smoothly pulse brightness with user-selected color.
-- **Fade**: Fade in/out in a sawtooth pattern, user color.
-- **Rainbow**: Both LEDs cycle through a smooth rainbow.
-- **Dual Rainbow**: Each LED cycles its own rainbow, offset from each other.
-- **Color Chase**: LEDs alternate between two user-selected colors in a chasing pattern.
-- **Sparkle**: Both LEDs randomly pick between two colors or off, creating a sparkling effect.
+Each animation allows independent color selection for **LED 0** and **LED 1** (where relevant):
+
+1. **Color Bounce:**  
+   LEDs alternate ("bounce") between two user-selected colors.
+2. **Breathing/Pulse:**  
+   Both LEDs pulse smoothly in brightness (each with its own color).
+3. **Chase:**  
+   A single color appears to "chase" between the two LEDs.
+4. **RGB Fade:**  
+   Both LEDs cycle through a full RGB color wheel/fade.
+5. **Blinking:**  
+   Both LEDs blink on/off, each with their selected color.
+6. **Alternating:**  
+   LEDs alternate their colors back and forth.
+7. **Fire/Flicker:**  
+   Both LEDs flicker with warm fire-like hues (per-LED random, colors not user-settable in this mode).
+
+All animations support speed and brightness adjustment via sliders.
+
+---
 
 ## Additional Notes
 
 - All configuration changes are persistent and will be restored on reboot.
-- If you lose WiFi access, hold the device reset to re-enter WiFi setup mode.
+- If you lose WiFi access, reset the device to re-enter WiFi setup mode.
+- Live preview works for both static and animated effects.
 
+---
 
 ## License
 
 MIT License
 
+---
 
 ### Attribution
 
 If you modify and redistribute this code, **please credit Darkone83 for the original source**.
-
 
