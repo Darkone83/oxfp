@@ -1,17 +1,25 @@
+// OXFP_config.cpp — full file
 #include "OXFP_config.h"
 #include <Preferences.h>
 #include "OXFP_orig.h"
 #include <ArduinoJson.h>
+#include <Arduino.h>
+#include <math.h>
 
 namespace {
     Preferences prefs;
     OXFP_Config config;
+
+    // Preview state
     bool inPreview = false;
     OXFP_Config previewConfig;
     unsigned long previewTimer = 0;
+
+    // Shared animation state (used by custom handlers)
     unsigned long lastAnimUpdate = 0;
     uint8_t animFrame = 0;
 
+    // Brightness scaling helper
     uint32_t rgbWithBrightness(const OXFP_RGB& c, uint8_t brightness) {
         return leds.Color(
             (uint8_t)((c.r * brightness) / 255),
@@ -19,28 +27,217 @@ namespace {
             (uint8_t)((c.b * brightness) / 255)
         );
     }
-}
 
+    // Render for Static mode that still reflects Xbox error inputs with assigned colors
+    void renderStaticWithErrorAwareness(const OXFP_Config& c) {
+        // Console OFF => blank
+        if (OXFP_orig::consoleIsOff()) {
+            leds.clear(); leds.show(); return;
+        }
+
+        bool LG, LR, RG, RR;
+        OXFP_orig::readInputLines(LG, LR, RG, RR);
+
+        // If no error is active, show the configured static color for both pixels
+        const bool err = OXFP_orig::errorActive();
+        if (!err) {
+            const uint32_t col = rgbWithBrightness(c.greenColor, c.brightness);
+            leds.setPixelColor(0, col);
+            leds.setPixelColor(1, col);
+            leds.show();
+            return;
+        }
+
+        // Error visible: per-side mapping using assigned colors
+        auto pick = [&](bool g, bool r)->uint32_t {
+            if (g && r) return rgbWithBrightness(c.orangeColor, c.brightness);
+            if (r)      return rgbWithBrightness(c.redColor,    c.brightness);
+            if (g)      return rgbWithBrightness(c.greenColor,  c.brightness);
+            return leds.Color(0,0,0);
+        };
+        leds.setPixelColor(0, pick(LG, LR)); // LEFT
+        leds.setPixelColor(1, pick(RG, RR)); // RIGHT
+        leds.show();
+    }
+
+    void endPreview() { inPreview = false; }
+
+    // Unified renderer for both preview and saved config
+    void renderFromConfig(const OXFP_Config& c) {
+        // Console OFF always blanks (regardless of mode)
+        if (OXFP_orig::consoleIsOff()) {
+            OXFP_orig::setPreemptOnError(false);
+            OXFP_orig::ledCustomOverride([]{
+                leds.clear(); leds.show();
+            });
+            return;
+        }
+
+        switch (c.mode) {
+            case OXFP_Mode::Stock: {
+                // Pure mirroring of Xbox lines (OG colors + blink patterns)
+                OXFP_orig::setPreemptOnError(false);
+                OXFP_orig::ledCustomOverride(nullptr);
+                return;
+            }
+
+            case OXFP_Mode::Static: {
+                // Show static color normally; if Xbox errors, reflect with assigned colors.
+                OXFP_orig::setPreemptOnError(false); // Static handles errors itself
+                OXFP_orig::ledCustomOverride([]{
+                    const auto& cc = inPreview ? previewConfig : config;
+                    renderStaticWithErrorAwareness(cc);
+                });
+                return;
+            }
+
+            case OXFP_Mode::Animation: {
+                // If an error is active, interrupt animation with stock mirroring.
+                OXFP_orig::setPreemptOnError(true);  // allow runtime preemption while animating
+                if (OXFP_orig::errorActive()) {
+                    OXFP_orig::ledCustomOverride(nullptr);
+                    return;
+                }
+
+                // Otherwise run the selected animation
+                OXFP_orig::ledCustomOverride([]{
+                    const auto& c = inPreview ? previewConfig : config;
+                    const unsigned long now = millis();
+                    const uint8_t s = c.animSpeed ? c.animSpeed : 1;
+
+                    const uint32_t cA = rgbWithBrightness(c.animColorA, c.brightness);
+                    const uint32_t cB = rgbWithBrightness(c.animColorB, c.brightness);
+
+                    switch (c.animMode) {
+                        case OXFP_AnimMode::ColorBounce: {
+                            if (now - lastAnimUpdate > (400 / s)) {
+                                animFrame ^= 1;
+                                lastAnimUpdate = now;
+                            }
+                            leds.setPixelColor(animFrame,     cA);
+                            leds.setPixelColor(!animFrame,    cB);
+                            leds.show();
+                            break;
+                        }
+
+                        case OXFP_AnimMode::Breathing: {
+                            if (now - lastAnimUpdate > 16) {
+                                lastAnimUpdate = now;
+                                animFrame++;
+                            }
+                            const float b = (sinf(animFrame / 12.0f) + 1.0f) * 0.5f; // 0..1
+                            const uint8_t bright = (uint8_t)(c.brightness * b);
+                            leds.setPixelColor(0, rgbWithBrightness(c.animColorA, bright));
+                            leds.setPixelColor(1, rgbWithBrightness(c.animColorB, bright));
+                            leds.show();
+                            break;
+                        }
+
+                        case OXFP_AnimMode::Chase: {
+                            if (now - lastAnimUpdate > (200 / s)) {
+                                animFrame = (animFrame + 1) & 0x01; // 0,1,0,1...
+                                lastAnimUpdate = now;
+                            }
+                            leds.setPixelColor(animFrame,   cA);
+                            leds.setPixelColor(!animFrame,  cB);
+                            leds.show();
+                            break;
+                        }
+
+                        case OXFP_AnimMode::RGBFade: {
+                            if (now - lastAnimUpdate > (16 * (11 - s))) {
+                                animFrame++;
+                                lastAnimUpdate = now;
+                            }
+                            const float x = (animFrame & 127) / 128.0f;
+                            const uint8_t r = (uint8_t)(sinf(2.0f * PI * x) * 127 + 128);
+                            const uint8_t g = (uint8_t)(sinf(2.0f * PI * x + 2.09f) * 127 + 128);
+                            const uint8_t b = (uint8_t)(sinf(2.0f * PI * x + 4.19f) * 127 + 128);
+                            const uint32_t col = rgbWithBrightness({r,g,b}, c.brightness);
+                            leds.setPixelColor(0, col);
+                            leds.setPixelColor(1, col);
+                            leds.show();
+                            break;
+                        }
+
+                        case OXFP_AnimMode::Blinking: {
+                            if (now - lastAnimUpdate > (400 / s)) {
+                                animFrame ^= 1;
+                                lastAnimUpdate = now;
+                            }
+                            leds.setPixelColor(0, animFrame ? cA : 0);
+                            leds.setPixelColor(1, animFrame ? cB : 0);
+                            leds.show();
+                            break;
+                        }
+
+                        case OXFP_AnimMode::Alternating: {
+                            if (now - lastAnimUpdate > (350 / s)) {
+                                animFrame ^= 1;
+                                lastAnimUpdate = now;
+                            }
+                            leds.setPixelColor(animFrame,    cA);
+                            leds.setPixelColor(!animFrame,   cB);
+                            leds.show();
+                            break;
+                        }
+
+                        case OXFP_AnimMode::FireFlicker: {
+                            if (now - lastAnimUpdate > 70) {
+                                lastAnimUpdate = now;
+                                const uint8_t r1 = 180 + (uint8_t)random(0, 75);
+                                const uint8_t g1 =  50 + (uint8_t)random(0, 60);
+                                const uint8_t b1 = (uint8_t)random(0, 16);
+                                const uint8_t r2 = 180 + (uint8_t)random(0, 75);
+                                const uint8_t g2 =  50 + (uint8_t)random(0, 60);
+                                const uint8_t b2 = (uint8_t)random(0, 16);
+                                leds.setPixelColor(0, rgbWithBrightness({r1,g1,b1}, c.brightness));
+                                leds.setPixelColor(1, rgbWithBrightness({r2,g2,b2}, c.brightness));
+                                leds.show();
+                            }
+                            break;
+                        }
+
+                        default: break;
+                    }
+                });
+                return;
+            }
+
+            default: {
+                OXFP_orig::setPreemptOnError(false);
+                OXFP_orig::ledCustomOverride(nullptr);
+                return;
+            }
+        }
+    }
+} // namespace
+
+// ---------------- Preferences ----------------
 void OXFP_config::loadPreferences() {
     prefs.begin("oxfp", true);
     config.mode        = (OXFP_Mode)prefs.getUChar("mode", (uint8_t)OXFP_Mode::Stock);
     config.brightness  = prefs.getUChar("bright", 128);
-    config.greenColor  = { prefs.getUChar("gr",0), prefs.getUChar("gg",255), prefs.getUChar("gb",0) };
-    config.redColor    = { prefs.getUChar("rr",255), prefs.getUChar("rg",0), prefs.getUChar("rb",0) };
+
+    config.greenColor  = { prefs.getUChar("gr",0),   prefs.getUChar("gg",255), prefs.getUChar("gb",0) };
+    config.redColor    = { prefs.getUChar("rr",255), prefs.getUChar("rg",0),   prefs.getUChar("rb",0) };
     config.orangeColor = { prefs.getUChar("or",255), prefs.getUChar("og",128), prefs.getUChar("ob",0) };
+
     config.animMode    = (OXFP_AnimMode)prefs.getUChar("anim", 0);
-    config.animColorA  = { prefs.getUChar("arA",0), prefs.getUChar("agA",128), prefs.getUChar("abA",255) };
-    config.animColorB  = { prefs.getUChar("arB",255), prefs.getUChar("agB",0), prefs.getUChar("abB",128) };
+    config.animColorA  = { prefs.getUChar("arA",0),   prefs.getUChar("agA",128), prefs.getUChar("abA",255) };
+    config.animColorB  = { prefs.getUChar("arB",255), prefs.getUChar("agB",0),   prefs.getUChar("abB",128) };
     config.animSpeed   = prefs.getUChar("spd", 5);
     prefs.end();
 }
 void OXFP_config::savePreferences() {
     prefs.begin("oxfp", false);
-    prefs.putUChar("mode", (uint8_t)config.mode);
+    prefs.putUChar("mode",   (uint8_t)config.mode);
     prefs.putUChar("bright", config.brightness);
-    prefs.putUChar("gr", config.greenColor.r); prefs.putUChar("gg", config.greenColor.g); prefs.putUChar("gb", config.greenColor.b);
-    prefs.putUChar("rr", config.redColor.r);   prefs.putUChar("rg", config.redColor.g);   prefs.putUChar("rb", config.redColor.b);
+
+    prefs.putUChar("gr", config.greenColor.r);  prefs.putUChar("gg", config.greenColor.g);  prefs.putUChar("gb", config.greenColor.b);
+    prefs.putUChar("rr", config.redColor.r);    prefs.putUChar("rg", config.redColor.g);    prefs.putUChar("rb", config.redColor.b);
     prefs.putUChar("or", config.orangeColor.r); prefs.putUChar("og", config.orangeColor.g); prefs.putUChar("ob", config.orangeColor.b);
+
     prefs.putUChar("anim", (uint8_t)config.animMode);
     prefs.putUChar("arA", config.animColorA.r); prefs.putUChar("agA", config.animColorA.g); prefs.putUChar("abA", config.animColorA.b);
     prefs.putUChar("arB", config.animColorB.r); prefs.putUChar("agB", config.animColorB.g); prefs.putUChar("abB", config.animColorB.b);
@@ -48,246 +245,27 @@ void OXFP_config::savePreferences() {
     prefs.end();
 }
 void OXFP_config::resetPreferences() {
-    config = OXFP_Config(); // Uses default values
+    config = OXFP_Config(); // defaults from struct
     savePreferences();
 }
-
 const OXFP_Config& OXFP_config::getConfig() { return config; }
 
+// ---------------- Lifecycle ----------------
 void OXFP_config::preview(const OXFP_Config& tmp) {
     inPreview = true;
     previewConfig = tmp;
     previewTimer = millis();
 }
-void endPreview() {
-    inPreview = false;
-}
 
 void OXFP_config::applyConfig() {
+    // Auto-exit preview after 8s
     if (inPreview && (millis() - previewTimer > 8000)) {
         endPreview();
     }
-
-if (inPreview) {
-    OXFP_orig::ledCustomOverride([]{
-        const auto& c = previewConfig;
-        unsigned long now = millis();
-        uint8_t s = c.animSpeed ? c.animSpeed : 1;
-        uint32_t cA = rgbWithBrightness(c.animColorA, c.brightness);
-        uint32_t cB = rgbWithBrightness(c.animColorB, c.brightness);
-        switch (c.mode) {
-            case OXFP_Mode::Static:
-                leds.setPixelColor(0, cA);
-                leds.setPixelColor(1, cB);
-                leds.show();
-                break;
-            case OXFP_Mode::Animation:
-                switch (c.animMode) {
-                    case OXFP_AnimMode::ColorBounce: {
-                        if (now - lastAnimUpdate > (400 / s)) {
-                            animFrame ^= 1;
-                            lastAnimUpdate = now;
-                        }
-                        leds.setPixelColor(animFrame, cA);
-                        leds.setPixelColor(!animFrame, cB);
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::Breathing: {
-                        if (now - lastAnimUpdate > 16) {
-                            lastAnimUpdate = now;
-                            animFrame++;
-                        }
-                        float b = (sin(animFrame / 12.0f) + 1.0f) * 0.5f;
-                        uint8_t bright = (uint8_t)(c.brightness * b);
-                        leds.setPixelColor(0, rgbWithBrightness(c.animColorA, bright));
-                        leds.setPixelColor(1, rgbWithBrightness(c.animColorB, bright));
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::Chase: {
-                        if (now - lastAnimUpdate > (200 / s)) {
-                            animFrame = (animFrame+1) % 2;
-                            lastAnimUpdate = now;
-                        }
-                        leds.setPixelColor(animFrame, cA);
-                        leds.setPixelColor(!animFrame, cB);
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::RGBFade: {
-                        if (now - lastAnimUpdate > (16 * (11 - s))) {
-                            animFrame++;
-                            lastAnimUpdate = now;
-                        }
-                        float x = (animFrame % 128) / 128.0f;
-                        uint8_t r = (uint8_t)(sin(PI*2*x)*127+128);
-                        uint8_t g = (uint8_t)(sin(PI*2*x + 2.09)*127+128);
-                        uint8_t b = (uint8_t)(sin(PI*2*x + 4.19)*127+128);
-                        uint32_t col = rgbWithBrightness({r,g,b}, c.brightness);
-                        leds.setPixelColor(0, col);
-                        leds.setPixelColor(1, col);
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::Blinking: {
-                        if (now - lastAnimUpdate > (400 / s)) {
-                            animFrame ^= 1;
-                            lastAnimUpdate = now;
-                        }
-                        uint32_t cAon = animFrame ? cA : 0;
-                        uint32_t cBon = animFrame ? cB : 0;
-                        leds.setPixelColor(0, cAon);
-                        leds.setPixelColor(1, cBon);
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::Alternating: {
-                        if (now - lastAnimUpdate > (350 / s)) {
-                            animFrame ^= 1;
-                            lastAnimUpdate = now;
-                        }
-                        leds.setPixelColor(animFrame, cA);
-                        leds.setPixelColor(!animFrame, cB);
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::FireFlicker: {
-                        if (now - lastAnimUpdate > 70) {
-                            lastAnimUpdate = now;
-                            uint8_t r1 = 180 + (rand() % 75);
-                            uint8_t g1 = 50 + (rand() % 60);
-                            uint8_t b1 = rand() % 16;
-                            uint8_t r2 = 180 + (rand() % 75);
-                            uint8_t g2 = 50 + (rand() % 60);
-                            uint8_t b2 = rand() % 16;
-                            leds.setPixelColor(0, rgbWithBrightness({r1,g1,b1}, c.brightness));
-                            leds.setPixelColor(1, rgbWithBrightness({r2,g2,b2}, c.brightness));
-                            leds.show();
-                        }
-                        break;
-                    }
-                    default: break;
-                }
-                break;
-            case OXFP_Mode::Stock:
-            default:
-                // fallback to nothing
-                break;
-        }
-    });
-    return;
-}
-    switch (config.mode) {
-        case OXFP_Mode::Stock:
-            OXFP_orig::ledCustomOverride(nullptr);
-            break;
-        case OXFP_Mode::Static:
-            OXFP_orig::ledCustomOverride([]{
-                uint32_t col = rgbWithBrightness(config.greenColor, config.brightness);
-                leds.setPixelColor(0, col);
-                leds.setPixelColor(1, col);
-                leds.show();
-            });
-            break;
-        case OXFP_Mode::Animation:
-            OXFP_orig::ledCustomOverride([]{
-                unsigned long now = millis();
-                uint8_t s = config.animSpeed ? config.animSpeed : 1;
-                uint32_t cA = rgbWithBrightness(config.animColorA, config.brightness);
-                uint32_t cB = rgbWithBrightness(config.animColorB, config.brightness);
-                switch (config.animMode) {
-                    case OXFP_AnimMode::ColorBounce: {
-                        if (now - lastAnimUpdate > (400 / s)) {
-                            animFrame ^= 1;
-                            lastAnimUpdate = now;
-                        }
-                        leds.setPixelColor(animFrame, cA);
-                        leds.setPixelColor(!animFrame, cB);
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::Breathing: {
-                        if (now - lastAnimUpdate > 16) {
-                            lastAnimUpdate = now;
-                            animFrame++;
-                        }
-                        float b = (sin(animFrame / 12.0f) + 1.0f) * 0.5f;
-                        uint8_t bright = (uint8_t)(config.brightness * b);
-                        leds.setPixelColor(0, rgbWithBrightness(config.animColorA, bright));
-                        leds.setPixelColor(1, rgbWithBrightness(config.animColorB, bright));
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::Chase: {
-                        if (now - lastAnimUpdate > (200 / s)) {
-                            animFrame = (animFrame+1) % 2;
-                            lastAnimUpdate = now;
-                        }
-                        leds.setPixelColor(animFrame, cA);
-                        leds.setPixelColor(!animFrame, cB);
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::RGBFade: {
-                        if (now - lastAnimUpdate > (16 * (11 - s))) {
-                            animFrame++;
-                            lastAnimUpdate = now;
-                        }
-                        float x = (animFrame % 128) / 128.0f;
-                        uint8_t r = (uint8_t)(sin(PI*2*x)*127+128);
-                        uint8_t g = (uint8_t)(sin(PI*2*x + 2.09)*127+128);
-                        uint8_t b = (uint8_t)(sin(PI*2*x + 4.19)*127+128);
-                        uint32_t col = rgbWithBrightness({r,g,b}, config.brightness);
-                        leds.setPixelColor(0, col);
-                        leds.setPixelColor(1, col);
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::Blinking: {
-                        if (now - lastAnimUpdate > (400 / s)) {
-                            animFrame ^= 1;
-                            lastAnimUpdate = now;
-                        }
-                        uint32_t cAon = animFrame ? cA : 0;
-                        uint32_t cBon = animFrame ? cB : 0;
-                        leds.setPixelColor(0, cAon);
-                        leds.setPixelColor(1, cBon);
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::Alternating: {
-                        if (now - lastAnimUpdate > (350 / s)) {
-                            animFrame ^= 1;
-                            lastAnimUpdate = now;
-                        }
-                        leds.setPixelColor(animFrame, cA);
-                        leds.setPixelColor(!animFrame, cB);
-                        leds.show();
-                        break;
-                    }
-                    case OXFP_AnimMode::FireFlicker: {
-                        if (now - lastAnimUpdate > 70) {
-                            lastAnimUpdate = now;
-                            uint8_t r1 = 180 + (rand() % 75);
-                            uint8_t g1 = 50 + (rand() % 60);
-                            uint8_t b1 = rand() % 16;
-                            uint8_t r2 = 180 + (rand() % 75);
-                            uint8_t g2 = 50 + (rand() % 60);
-                            uint8_t b2 = rand() % 16;
-                            leds.setPixelColor(0, rgbWithBrightness({r1,g1,b1}, config.brightness));
-                            leds.setPixelColor(1, rgbWithBrightness({r2,g2,b2}, config.brightness));
-                            leds.show();
-                        }
-                        break;
-                    }
-                    default: break;
-                }
-            });
-            break;
-    }
+    renderFromConfig(inPreview ? previewConfig : config);
 }
 
+// ---------------- Web UI & API ----------------
 static String configToJson(const OXFP_Config& c) {
     StaticJsonDocument<384> doc;
     doc["mode"] = (uint8_t)c.mode;
@@ -309,6 +287,7 @@ static String configToJson(const OXFP_Config& c) {
     orangeArr.add(c.orangeColor.b);
 
     doc["animMode"] = (uint8_t)c.animMode;
+
     JsonArray animArrA = doc.createNestedArray("animColorA");
     animArrA.add(c.animColorA.r);
     animArrA.add(c.animColorA.g);
@@ -320,6 +299,7 @@ static String configToJson(const OXFP_Config& c) {
     animArrB.add(c.animColorB.b);
 
     doc["animSpeed"] = c.animSpeed;
+
     String out;
     serializeJson(doc, out);
     return out;
@@ -500,18 +480,26 @@ fetchConfig();
             OXFP_Config tmp;
             tmp.mode = (OXFP_Mode)doc["mode"].as<uint8_t>();
             tmp.brightness = doc["brightness"].as<uint8_t>();
+
             auto arr = doc["greenColor"].as<JsonArray>();
             tmp.greenColor = { arr[0], arr[1], arr[2] };
+
             arr = doc["redColor"].as<JsonArray>();
             tmp.redColor = { arr[0], arr[1], arr[2] };
+
             arr = doc["orangeColor"].as<JsonArray>();
             tmp.orangeColor = { arr[0], arr[1], arr[2] };
+
             tmp.animMode = (OXFP_AnimMode)doc["animMode"].as<uint8_t>();
+
             auto arrA = doc["animColorA"].as<JsonArray>();
             tmp.animColorA = { arrA[0], arrA[1], arrA[2] };
+
             auto arrB = doc["animColorB"].as<JsonArray>();
             tmp.animColorB = { arrB[0], arrB[1], arrB[2] };
+
             tmp.animSpeed = doc["animSpeed"].as<uint8_t>();
+
             OXFP_config::preview(tmp);
             request->send(200, "text/plain", "Previewing");
         }
@@ -524,20 +512,29 @@ fetchConfig();
         [](AsyncWebServerRequest *request, uint8_t* data, size_t len, size_t, size_t){
             StaticJsonDocument<384> doc;
             deserializeJson(doc, data, len);
+
             config.mode = (OXFP_Mode)doc["mode"].as<uint8_t>();
             config.brightness = doc["brightness"].as<uint8_t>();
+
             auto arr = doc["greenColor"].as<JsonArray>();
             config.greenColor = { arr[0], arr[1], arr[2] };
+
             arr = doc["redColor"].as<JsonArray>();
             config.redColor = { arr[0], arr[1], arr[2] };
+
             arr = doc["orangeColor"].as<JsonArray>();
             config.orangeColor = { arr[0], arr[1], arr[2] };
+
             config.animMode = (OXFP_AnimMode)doc["animMode"].as<uint8_t>();
+
             auto arrA = doc["animColorA"].as<JsonArray>();
             config.animColorA = { arrA[0], arrA[1], arrA[2] };
+
             auto arrB = doc["animColorB"].as<JsonArray>();
             config.animColorB = { arrB[0], arrB[1], arrB[2] };
+
             config.animSpeed = doc["animSpeed"].as<uint8_t>();
+
             OXFP_config::savePreferences();
             inPreview = false;
             OXFP_config::applyConfig();
