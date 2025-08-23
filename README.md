@@ -22,7 +22,7 @@ OXFP is a highly flexible RGB controller for the original Xbox front panel, supp
   Override the default Xbox logic with custom color mapping for Red, Green, and Orange states on both LEDs.
 
 - **Advanced Animation Modes:**  
-  Select from 10 dynamic RGB effects, each with customizable per-LED colors (where applicable) and adjustable speed.
+  Select from 11 dynamic RGB effects, each with customizable per-LED colors (where applicable) and adjustable speed.
 
 - **Expanability:**
   Add 2 extra WS2812-compatible LED strips for more flair. LED strips will reflect LEDS on the OXFP.
