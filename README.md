@@ -1,4 +1,4 @@
-# OXFP - Original Xbox Front Panel RGB Controller
+# OXFP - Original Xbox Front Panel with RGB control
 
 <div align=center>
   <img src="https://github.com/Darkone83/oxfp/blob/main/images/DC%20logo.png">
