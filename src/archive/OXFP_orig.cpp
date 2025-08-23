@@ -1,90 +1,140 @@
-#include "oxfp_orig.h"
+#include "OXFP_orig.h"
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
 
-#define PIN_LGI     15
-#define PIN_RGI     19
-#define PIN_LRI     18
-#define PIN_RRI     14
-#define WS2812_PIN  5
-#define NUM_LEDS    2
+// ====== XBOX INPUT LINES (HIGH = ON). Avoid GPIO19/20 on ESP32-S3 if using native USB. ======
+#define PIN_LGI     19  // Left  Green
+#define PIN_RGI     15  // Right Green
+#define PIN_LRI     18  // Left  Red
+#define PIN_RRI     20  // Right Red
+
+// ====== INTERNAL RING ======
+#define WS2812_PIN      5
+#define NUM_LEDS        2
+#define PIXEL_LEFT      0
+#define PIXEL_RIGHT     1
 
 Adafruit_NeoPixel leds(NUM_LEDS, WS2812_PIN, NEO_GRB + NEO_KHZ800);
 
+// ====== EXTERNAL MIRROR OUTPUTS (fixed to ONE pixel each) ======
+#ifndef EXT_MIRROR_LEFT_PIN
+#define EXT_MIRROR_LEFT_PIN   4    // mirrors LED 0 (left)
+#endif
+#ifndef EXT_MIRROR_RIGHT_PIN
+#define EXT_MIRROR_RIGHT_PIN  3    // mirrors LED 1 (right)
+#endif
+
+static Adafruit_NeoPixel extLeft (1, EXT_MIRROR_LEFT_PIN,  NEO_GRB + NEO_KHZ800);
+static Adafruit_NeoPixel extRight(1, EXT_MIRROR_RIGHT_PIN, NEO_GRB + NEO_KHZ800);
+
 namespace {
-    void (*customHandler)(void) = nullptr;
-}
+  void (*customHandler)(void) = nullptr;
+  bool preemptOnError = false;
 
-static void updateLedsFromInputs() {
-    // Active low logic
-    bool leftGreenOn  = (digitalRead(PIN_LGI) == LOW);
-    bool leftRedOn    = (digitalRead(PIN_LRI) == LOW);
-    bool rightGreenOn = (digitalRead(PIN_RGI) == LOW);
-    bool rightRedOn   = (digitalRead(PIN_RRI) == LOW);
+  uint32_t lastAnyHighMs = 0;
+  const uint32_t offDebounceMs = 300;
 
-    // Debug print all states
-    Serial.printf("LGI:%d RGI:%d LRI:%d RRI:%d\n", leftGreenOn, rightGreenOn, leftRedOn, rightRedOn);
+  inline bool lineOn(uint8_t pin) { return digitalRead(pin) == HIGH; }
 
-if (!leftGreenOn && !leftRedOn && !rightGreenOn && !rightRedOn) {
-    leds.setPixelColor(0, 0);
-    leds.setPixelColor(1, 0);
-    leds.show();
-    return;
-}
+  inline uint32_t colOff()   { return leds.Color(0,0,0); }
+  inline uint32_t colGreen() { return leds.Color(0,255,0); }
+  inline uint32_t colRed()   { return leds.Color(255,0,0); }
+  inline uint32_t colAmber() { return leds.Color(255,128,0); }
 
-    // RIGHT LED (Pixel 0)
-    uint32_t rightColor = 0;
-    if (rightGreenOn && rightRedOn)
-        rightColor = leds.Color(255, 128, 0);      // Orange
-    else if (rightGreenOn)
-        rightColor = leds.Color(0, 255, 0);        // Green
-    else if (rightRedOn)
-        rightColor = leds.Color(255, 0, 0);        // Red
-    else
-        rightColor = leds.Color(0, 0, 0);          // Off
+  inline void renderStock(bool LG, bool LR, bool RG, bool RR) {
+    uint32_t left  = (LG&&LR) ? colAmber() : LG ? colGreen() : LR ? colRed() : colOff();
+    uint32_t right = (RG&&RR) ? colAmber() : RG ? colGreen() : RR ? colRed() : colOff();
+    leds.setPixelColor(PIXEL_LEFT,  left);
+    leds.setPixelColor(PIXEL_RIGHT, right);
+    // mirrored show is called by caller
+  }
 
-    // LEFT LED (Pixel 1)
-    uint32_t leftColor = 0;
-    if (leftGreenOn && leftRedOn)
-        leftColor = leds.Color(255, 128, 0);       // Orange
-    else if (leftGreenOn)
-        leftColor = leds.Color(0, 255, 0);         // Green
-    else if (leftRedOn)
-        leftColor = leds.Color(255, 0, 0);         // Red
-    else
-        leftColor = leds.Color(0, 0, 0);           // Off
-
-    leds.setPixelColor(0, leftColor); // Pixel 0 = RIGHT
-    leds.setPixelColor(1, rightColor);  // Pixel 1 = LEFT
-    leds.show();
+  inline void mirrorOnePixel(Adafruit_NeoPixel& s, uint32_t color) {
+    s.setPixelColor(0, color);
+    s.show();
+  }
 }
 
 namespace OXFP_orig {
 
 void begin() {
-    Serial.begin(115200);
-    delay(100); // Allow time for Serial to init
+  pinMode(PIN_LGI, INPUT_PULLDOWN);
+  pinMode(PIN_RGI, INPUT_PULLDOWN);
+  pinMode(PIN_LRI, INPUT_PULLDOWN);
+  pinMode(PIN_RRI, INPUT_PULLDOWN);
 
-    pinMode(PIN_LGI, INPUT);
-    pinMode(PIN_RGI, INPUT);
-    pinMode(PIN_LRI, INPUT);
-    pinMode(PIN_RRI, INPUT);
-    leds.begin();
-    leds.clear();
-    leds.show();
-    Serial.println("[OXFP_orig] begin() complete");
+  leds.begin();
+  leds.setBrightness(255);
+  leds.clear();
+  leds.show();
+
+  extLeft.begin();  extLeft.clear();  extLeft.show();
+  extRight.begin(); extRight.clear(); extRight.show();
+}
+
+void showMirrored() {
+  // Push internal first to keep timing consistent
+  leds.show();
+
+  // Mirror LED0/LED1 colors to single external pixels
+  const uint32_t left  = leds.getPixelColor(PIXEL_LEFT);
+  const uint32_t right = leds.getPixelColor(PIXEL_RIGHT);
+  mirrorOnePixel(extLeft,  left);
+  mirrorOnePixel(extRight, right);
 }
 
 void loop() {
-    if (customHandler) {
-        customHandler();
-        return;
-    }
-    updateLedsFromInputs();
+  // Always sample inputs so we can decide about preemption & off blanking
+  const bool LG = lineOn(PIN_LGI);
+  const bool LR = lineOn(PIN_LRI);
+  const bool RG = lineOn(PIN_RGI);
+  const bool RR = lineOn(PIN_RRI);
+  const bool anyHigh = LG || LR || RG || RR;
+  if (anyHigh) lastAnyHighMs = millis();
+
+  // Console OFF: always blank
+  if (!anyHigh && (millis() - lastAnyHighMs) > offDebounceMs) {
+    leds.clear();
+    showMirrored();
+    return;
+  }
+
+  const bool isError = (LR || RR || (LG && LR) || (RG && RR));
+
+  // Preempt custom during error (for animations)
+  if (customHandler && preemptOnError && isError) {
+    renderStock(LG, LR, RG, RR);
+    showMirrored();
+    return;
+  }
+
+  // Custom or stock
+  if (customHandler) { customHandler(); return; }
+  renderStock(LG, LR, RG, RR);
+  showMirrored();
 }
 
-void ledCustomOverride(void (*handler)(void)) {
-    customHandler = handler;
+void ledCustomOverride(void (*handler)(void)) { customHandler = handler; }
+void setPreemptOnError(bool enable) { preemptOnError = enable; }
+
+// --- Query helpers ---
+void readInputLines(bool& leftGreen, bool& leftRed, bool& rightGreen, bool& rightRed) {
+  leftGreen  = lineOn(PIN_LGI);
+  leftRed    = lineOn(PIN_LRI);
+  rightGreen = lineOn(PIN_RGI);
+  rightRed   = lineOn(PIN_RRI);
+  if (leftGreen || leftRed || rightGreen || rightRed) lastAnyHighMs = millis();
+}
+
+bool consoleIsOff() {
+  bool LG = lineOn(PIN_LGI), LR = lineOn(PIN_LRI), RG = lineOn(PIN_RGI), RR = lineOn(PIN_RRI);
+  if (LG || LR || RG || RR) { lastAnyHighMs = millis(); return false; }
+  return (millis() - lastAnyHighMs) > offDebounceMs;
+}
+
+bool errorActive() {
+  bool LG = lineOn(PIN_LGI), LR = lineOn(PIN_LRI), RG = lineOn(PIN_RGI), RR = lineOn(PIN_RRI);
+  return (LR || RR || (LG && LR) || (RG && RR));
 }
 
 } // namespace OXFP_orig

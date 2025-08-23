@@ -6,7 +6,7 @@
 #define PIN_LGI     19  // Left  Green
 #define PIN_RGI     15  // Right Green
 #define PIN_LRI     18  // Left  Red
-#define PIN_RRI     20  // Right Red
+#define PIN_RRI     21  // Right Red 20 old pin
 
 // ====== INTERNAL RING ======
 #define WS2812_PIN      5
@@ -30,6 +30,11 @@ static Adafruit_NeoPixel extRight(1, EXT_MIRROR_RIGHT_PIN, NEO_GRB + NEO_KHZ800)
 namespace {
   void (*customHandler)(void) = nullptr;
   bool preemptOnError = false;
+
+  // --- Mirroring workaround flags (mutually exclusive) ---
+  // Default ON: mirror RIGHT from LEFT to mask a flaky right input.
+  bool mirrorRfromL = true;
+  bool mirrorLfromR = false;
 
   uint32_t lastAnyHighMs = 0;
   const uint32_t offDebounceMs = 300;
@@ -73,12 +78,23 @@ void begin() {
 }
 
 void showMirrored() {
-  // Push internal first to keep timing consistent
+  // Read current buffer colors
+  uint32_t left  = leds.getPixelColor(PIXEL_LEFT);
+  uint32_t right = leds.getPixelColor(PIXEL_RIGHT);
+
+  // Apply mirroring workaround before showing
+  if (mirrorRfromL) {
+    right = left;
+  } else if (mirrorLfromR) {
+    left = right;
+  }
+
+  // Write back and show internal
+  leds.setPixelColor(PIXEL_LEFT,  left);
+  leds.setPixelColor(PIXEL_RIGHT, right);
   leds.show();
 
-  // Mirror LED0/LED1 colors to single external pixels
-  const uint32_t left  = leds.getPixelColor(PIXEL_LEFT);
-  const uint32_t right = leds.getPixelColor(PIXEL_RIGHT);
+  // Mirror to external single-pixel outputs on GPIO4 (LED0) and GPIO3 (LED1)
   mirrorOnePixel(extLeft,  left);
   mirrorOnePixel(extRight, right);
 }
@@ -116,6 +132,16 @@ void loop() {
 
 void ledCustomOverride(void (*handler)(void)) { customHandler = handler; }
 void setPreemptOnError(bool enable) { preemptOnError = enable; }
+
+// Workaround controls (mutually exclusive toggles)
+void setMirrorRightFromLeft(bool enable) {
+  mirrorRfromL = enable;
+  if (enable) mirrorLfromR = false;
+}
+void setMirrorLeftFromRight(bool enable) {
+  mirrorLfromR = enable;
+  if (enable) mirrorRfromL = false;
+}
 
 // --- Query helpers ---
 void readInputLines(bool& leftGreen, bool& leftRed, bool& rightGreen, bool& rightRed) {
