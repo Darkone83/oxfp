@@ -52,9 +52,31 @@ Install via Arduino Library Manager:
 
 ---
 
+## Required Hardware
+
+ESP32 C6 Zero: <a href="https://www.amazon.com/dp/B0D1CB3PBW?ref=ppx_yo2ov_dt_b_fed_asin_title">Amazon</a>
+
+JST 1.0 3P Connectors: <a href="https://www.amazon.com/dp/B0CQ28CCQG?ref=ppx_yo2ov_dt_b_fed_asin_title&th=1">Amazon</a>
+
+Buttons: <a href="https://www.lcsc.com/product-detail/C5340161.html">LCSC</a>, <a href="https://www.digikey.com/en/products/detail/c-k/PTS647SK38SMTR2-LFS/9649862">Digi-Key</a>
+
+WS2812 LED's: <a href="https://www.amazon.com/dp/B09X1JYT6R?th=1">Amazon</a>
+
+Optional:
+
+WS2812 LED strip: <a href="https://www.amazon.com/dp/B09PBGZMNS?th=1">Amazon</a>
+
+JSt 1.0 Connector kit: <a href="https://www.amazon.com/dp/B0D5X6BY5Z">Amazon</a>
+
+---
+
 ## Hardware Connections
 
-Remove the connector from your original Xbox front panel and solder to the OXFP board. Provide a separate 5V wire to the 5V pad to power the WS2812 LEDs.
+Remove the connector from your original Xbox front panel and solder to the OXFP board. Provide a separate 5V wire to the 5V pad to power the WS2812 LEDs and connect ground to the GND pad.
+
+If you can't reuse your original XBOX FP harness, an alternate can be sourced
+
+PHD 2.0 10p : <a href="https://www.aliexpress.us/item/3256807761209020.html?spm=a2g0o.order_list.order_list_main.59.2dc11802OOCfQn&gatewayAdapt=glo2usa">Aliexpress</>
 
 ---
 
