@@ -22,7 +22,10 @@ OXFP is a highly flexible RGB controller for the original Xbox front panel, supp
   Override the default Xbox logic with custom color mapping for Red, Green, and Orange states on both LEDs.
 
 - **Advanced Animation Modes:**  
-  Select from 7 dynamic RGB effects, each with customizable per-LED colors (where applicable) and adjustable speed.
+  Select from 10 dynamic RGB effects, each with customizable per-LED colors (where applicable) and adjustable speed.
+
+- **Expanability:**
+  Add 2 extra WS2812-compatible LED strips for more flair. LED strips will reflect LEDS on the OXFP.
 
 - **Global Brightness Control:**  
   Adjust the overall LED brightness live from the web interface.
@@ -118,6 +121,14 @@ Each animation allows independent color selection for **LED 0** and **LED 1** (w
    LEDs alternate their colors back and forth.
 7. **Fire/Flicker:**  
    Both LEDs flicker with warm fire-like hues (per-LED random, colors not user-settable in this mode).
+8. **Plasma:**
+    Smooth, organic “plasma” glow—continuous cross-fade with subtle spectral drift.
+9. **Heartbeat:**
+    “Lub-dub” rhythm: quick double-pulse then rest; A on left, B on right.
+10. **Opposed Breath:**
+    Counter-phase breathing—left brightens while right dims (and vice versa).
+11. **Sparkle:**
+    Sparse random sparkles over a dark base; brief pops in A/B.
 
 All animations support speed and brightness adjustment via sliders.
 
