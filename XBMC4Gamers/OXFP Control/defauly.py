@@ -461,17 +461,6 @@ def do_anim_settings(cfg):
     ok = try_set_live(cfg, {"mode":2,"animMode":idx,"animSpeed":spd,"animColorA":a,"animColorB":b})
     show_notification("Animation applied" if ok else "Failed to apply animation")
 
-def do_preview(cfg):
-    ms = ask_int("Preview milliseconds", 8000, 500, 20000)
-    idx = pick_from_list("Preview Which?", ["Current RAM config", "Custom Quick Plasma"])
-    if idx == 0:
-        ok = try_preview(cfg, {}, ms)
-    else:
-        pkt = {"mode":2,"animMode":7,"animSpeed":6,"brightness":180,
-               "animColorA":[0,128,255],"animColorB":[255,0,128]}
-        ok = try_preview(cfg, pkt, ms)
-    show_notification("Preview sent" if ok else "Preview failed")
-
 def do_save(cfg):
     ok = try_save(cfg)
     show_notification("Saved" if ok else "Save failed")
@@ -479,12 +468,6 @@ def do_save(cfg):
 def do_reset(cfg):
     ok = try_reset(cfg)
     show_notification("Defaults applied" if ok else "Reset failed")
-
-def do_identify(cfg):
-    ms = ask_int("Identify (ms)", 1500, 200, 5000)
-    client = OXFPClient(cfg["ip"], cfg["port"], cfg["timeout_ms"])
-    r = client.identify(ms=ms)
-    show_notification("Identifying…" if (r and r.get("ok")) else "Identify failed (UDP only)")
 
 def main_menu():
     cfg = load_cfg()
@@ -501,14 +484,11 @@ def main_menu():
             "Set Brightness",
             "Set Static Colors",
             "Set Animation (mode/speed/colors)",
-            "Preview",
             "Save to NVS",
-            "Reset to defaults",
-            "Identify (blink)",
-            "Quit"
+            "Reset to defaults"
         ]
         sel = pick_from_list("OXFP Controller", menu)
-        if sel == -1 or sel == len(menu)-1: break
+        if sel == -1: break
 
         if sel == 0:
             cfg = autodetect(cfg); continue
@@ -527,10 +507,8 @@ def main_menu():
         elif sel == 4: do_brightness(cfg)
         elif sel == 5: do_static_colors(cfg)
         elif sel == 6: do_anim_settings(cfg)
-        elif sel == 7: do_preview(cfg)
-        elif sel == 8: do_save(cfg)
-        elif sel == 9: do_reset(cfg)
-        elif sel == 10: do_identify(cfg)
+        elif sel == 7: do_save(cfg)
+        elif sel == 8: do_reset(cfg)
 
 if __name__ == "__main__":
     try:
