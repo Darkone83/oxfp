@@ -2,11 +2,21 @@
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
 
-// ====== XBOX INPUT LINES (HIGH = ON). Avoid GPIO19/20 on ESP32-S3 if using native USB. ======
+// ==========================
+// Optional self-test (compile-time)
+// Set to 1 to bypass inputs and cycle both channels so you can confirm
+// that LEFT (pixel 0) and RIGHT (pixel 1) + both external strips update.
+// ==========================
+// #define OXFP_SELFTEST 1
+#ifndef OXFP_SELFTEST
+#define OXFP_SELFTEST 0
+#endif
+
+// ====== XBOX INPUT LINES (HIGH = ON) ======
 #define PIN_LGI     19  // Left  Green
 #define PIN_RGI     15  // Right Green
 #define PIN_LRI     18  // Left  Red
-#define PIN_RRI     21  // Right Red 20 old pin
+#define PIN_RRI     21  // Right Red
 
 // ====== INTERNAL RING ======
 #define WS2812_PIN      5
@@ -16,25 +26,32 @@
 
 Adafruit_NeoPixel leds(NUM_LEDS, WS2812_PIN, NEO_GRB + NEO_KHZ800);
 
-// ====== EXTERNAL MIRROR OUTPUTS (fixed to ONE pixel each) ======
+// ====== EXTERNAL MIRROR OUTPUTS (mirrors LED0 to GPIO4, LED1 to GPIO3) ======
 #ifndef EXT_MIRROR_LEFT_PIN
-#define EXT_MIRROR_LEFT_PIN   4    // mirrors LED 0 (left)
+#define EXT_MIRROR_LEFT_PIN   4
 #endif
 #ifndef EXT_MIRROR_RIGHT_PIN
-#define EXT_MIRROR_RIGHT_PIN  3    // mirrors LED 1 (right)
+#define EXT_MIRROR_RIGHT_PIN  3
 #endif
 
-static Adafruit_NeoPixel extLeft (1, EXT_MIRROR_LEFT_PIN,  NEO_GRB + NEO_KHZ800);
-static Adafruit_NeoPixel extRight(1, EXT_MIRROR_RIGHT_PIN, NEO_GRB + NEO_KHZ800);
+// You MUST declare a pixel count to drive a WS2812 strip.
+// If the actual strip is shorter, the extra data is safely ignored.
+#ifndef EXT_MIRROR_LEFT_COUNT
+#define EXT_MIRROR_LEFT_COUNT   30
+#endif
+#ifndef EXT_MIRROR_RIGHT_COUNT
+#define EXT_MIRROR_RIGHT_COUNT  30
+#endif
+
+static Adafruit_NeoPixel extLeft (EXT_MIRROR_LEFT_COUNT,  EXT_MIRROR_LEFT_PIN,  NEO_GRB + NEO_KHZ800);
+static Adafruit_NeoPixel extRight(EXT_MIRROR_RIGHT_COUNT, EXT_MIRROR_RIGHT_PIN, NEO_GRB + NEO_KHZ800);
 
 namespace {
   void (*customHandler)(void) = nullptr;
   bool preemptOnError = false;
 
-  // --- Mirroring workaround flags (mutually exclusive) ---
-  // Default ON: mirror RIGHT from LEFT to mask a flaky right input.
-  bool mirrorRfromL = true;
-  bool mirrorLfromR = false;
+  // NEW: runtime toggle — copy left pixel to right (used for Stock; can be enabled for Static)
+  bool copyLeftToRight = false;
 
   uint32_t lastAnyHighMs = 0;
   const uint32_t offDebounceMs = 300;
@@ -51,13 +68,37 @@ namespace {
     uint32_t right = (RG&&RR) ? colAmber() : RG ? colGreen() : RR ? colRed() : colOff();
     leds.setPixelColor(PIXEL_LEFT,  left);
     leds.setPixelColor(PIXEL_RIGHT, right);
-    // mirrored show is called by caller
   }
 
-  inline void mirrorOnePixel(Adafruit_NeoPixel& s, uint32_t color) {
-    s.setPixelColor(0, color);
+  inline void mirrorFillStrip(Adafruit_NeoPixel& s, uint32_t color) {
+    const uint16_t n = s.numPixels();
+    for (uint16_t i = 0; i < n; ++i) s.setPixelColor(i, color);
     s.show();
   }
+
+#if OXFP_SELFTEST
+  // Simple state machine to prove both channels are driven
+  uint8_t st_state = 0;
+  uint32_t st_last = 0;
+  const uint32_t ST_STEP_MS = 800; // duration per step
+  void runSelfTest() {
+    const uint32_t now = millis();
+    if (now - st_last > ST_STEP_MS) {
+      st_last = now;
+      st_state = (st_state + 1) % 4; // 0:clear, 1:left, 2:right, 3:both
+    }
+    uint32_t leftC  = 0;
+    uint32_t rightC = 0;
+    switch (st_state) {
+      case 0: leftC = 0; rightC = 0; break;                     // both off
+      case 1: leftC = leds.Color(0,255,0); rightC = 0; break;   // left green
+      case 2: leftC = 0; rightC = leds.Color(255,0,255); break; // right purple
+      case 3: leftC = leds.Color(0,255,0); rightC = leds.Color(255,0,255); break; // both
+    }
+    leds.setPixelColor(PIXEL_LEFT,  leftC);
+    leds.setPixelColor(PIXEL_RIGHT, rightC);
+  }
+#endif
 }
 
 namespace OXFP_orig {
@@ -73,34 +114,49 @@ void begin() {
   leds.clear();
   leds.show();
 
-  extLeft.begin();  extLeft.clear();  extLeft.show();
-  extRight.begin(); extRight.clear(); extRight.show();
+  extLeft.begin();
+  extLeft.setBrightness(255);
+  extLeft.clear();
+  extLeft.show();
+
+  extRight.begin();
+  extRight.setBrightness(255);
+  extRight.clear();
+  extRight.show();
 }
 
 void showMirrored() {
-  // Read current buffer colors
-  uint32_t left  = leds.getPixelColor(PIXEL_LEFT);
-  uint32_t right = leds.getPixelColor(PIXEL_RIGHT);
-
-  // Apply mirroring workaround before showing
-  if (mirrorRfromL) {
-    right = left;
-  } else if (mirrorLfromR) {
-    left = right;
-  }
-
-  // Write back and show internal
-  leds.setPixelColor(PIXEL_LEFT,  left);
-  leds.setPixelColor(PIXEL_RIGHT, right);
+  // Show the internal 2-pixel ring first (so getPixelColor reads latest buffer)
   leds.show();
 
-  // Mirror to external single-pixel outputs on GPIO4 (LED0) and GPIO3 (LED1)
-  mirrorOnePixel(extLeft,  left);
-  mirrorOnePixel(extRight, right);
+  // Read the two independent pixel colors
+  uint32_t leftCol  = leds.getPixelColor(PIXEL_LEFT);
+  uint32_t rightCol = leds.getPixelColor(PIXEL_RIGHT);
+
+  // Only copy LEFT->RIGHT when no custom handler is active (i.e., Stock),
+  // and the runtime flag is enabled.
+  if ((customHandler == nullptr) && copyLeftToRight) {
+    rightCol = leftCol;
+  }
+
+  // Write back (ensures both internal pixels reflect same values we mirror)
+  leds.setPixelColor(PIXEL_LEFT,  leftCol);
+  leds.setPixelColor(PIXEL_RIGHT, rightCol);
+  leds.show();
+
+  // Fill entire external strips with their respective colors
+  mirrorFillStrip(extLeft,  leftCol);
+  mirrorFillStrip(extRight, rightCol);
 }
 
 void loop() {
-  // Always sample inputs so we can decide about preemption & off blanking
+#if OXFP_SELFTEST
+  // Bypass inputs; prove both channels are driven independently
+  runSelfTest();
+  showMirrored();
+  return;
+#endif
+
   const bool LG = lineOn(PIN_LGI);
   const bool LR = lineOn(PIN_LRI);
   const bool RG = lineOn(PIN_RGI);
@@ -117,7 +173,7 @@ void loop() {
 
   const bool isError = (LR || RR || (LG && LR) || (RG && RR));
 
-  // Preempt custom during error (for animations)
+  // Preempt custom during error (for animations) if requested
   if (customHandler && preemptOnError && isError) {
     renderStock(LG, LR, RG, RR);
     showMirrored();
@@ -125,7 +181,7 @@ void loop() {
   }
 
   // Custom or stock
-  if (customHandler) { customHandler(); return; }
+  if (customHandler) { customHandler(); showMirrored(); return; }
   renderStock(LG, LR, RG, RR);
   showMirrored();
 }
@@ -133,15 +189,8 @@ void loop() {
 void ledCustomOverride(void (*handler)(void)) { customHandler = handler; }
 void setPreemptOnError(bool enable) { preemptOnError = enable; }
 
-// Workaround controls (mutually exclusive toggles)
-void setMirrorRightFromLeft(bool enable) {
-  mirrorRfromL = enable;
-  if (enable) mirrorLfromR = false;
-}
-void setMirrorLeftFromRight(bool enable) {
-  mirrorLfromR = enable;
-  if (enable) mirrorRfromL = false;
-}
+// NEW: expose runtime control for LEFT->RIGHT copying
+void setCopyLeftToRight(bool enable) { copyLeftToRight = enable; }
 
 // --- Query helpers ---
 void readInputLines(bool& leftGreen, bool& leftRed, bool& rightGreen, bool& rightRed) {

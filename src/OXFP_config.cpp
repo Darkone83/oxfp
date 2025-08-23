@@ -1,4 +1,4 @@
-// OXFP_config.cpp — full file (older codebase, no mirroring; PROGMEM UI; chunk-safe POST; root untouched)
+// OXFP_config.cpp — full file (older codebase, animations preempted on error; stock/static copy L->R)
 #include "OXFP_config.h"
 #include <Preferences.h>
 #include "OXFP_orig.h"
@@ -61,7 +61,7 @@ namespace {
     void renderStaticWithErrorAwareness(const OXFP_Config& c) {
         // Console OFF => blank
         if (OXFP_orig::consoleIsOff()) {
-            leds.clear(); leds.show(); return;
+            leds.clear(); OXFP_orig::showMirrored(); return;
         }
 
         bool LG, LR, RG, RR;
@@ -73,7 +73,7 @@ namespace {
             const uint32_t col = rgbWithBrightness(c.greenColor, c.brightness);
             leds.setPixelColor(0, col);
             leds.setPixelColor(1, col);
-            leds.show();
+            OXFP_orig::showMirrored();
             return;
         }
 
@@ -86,7 +86,7 @@ namespace {
         };
         leds.setPixelColor(0, pick(LG, LR)); // LEFT
         leds.setPixelColor(1, pick(RG, RR)); // RIGHT
-        leds.show();
+        OXFP_orig::showMirrored();
     }
 
     void endPreview() { inPreview = false; }
@@ -322,8 +322,9 @@ fetchConfig();
         // Console OFF always blanks (regardless of mode)
         if (OXFP_orig::consoleIsOff()) {
             OXFP_orig::setPreemptOnError(false);
+            OXFP_orig::setCopyLeftToRight(true); // harmless when off (both end up off anyway)
             OXFP_orig::ledCustomOverride([]{
-                leds.clear(); leds.show();
+                leds.clear(); OXFP_orig::showMirrored();
             });
             return;
         }
@@ -333,11 +334,15 @@ fetchConfig();
 
         switch (c.mode) {
             case OXFP_Mode::Stock: {
+                // Stock + copy L->R (per requirement)
+                OXFP_orig::setCopyLeftToRight(true);
                 OXFP_orig::setPreemptOnError(false);
                 OXFP_orig::ledCustomOverride(nullptr);
                 return;
             }
             case OXFP_Mode::Static: {
+                // Static + copy L->R (per requirement)
+                OXFP_orig::setCopyLeftToRight(true);
                 OXFP_orig::setPreemptOnError(false);
                 OXFP_orig::ledCustomOverride([]{
                     const auto& cc = inPreview ? previewConfig : config;
@@ -346,10 +351,13 @@ fetchConfig();
                 return;
             }
             case OXFP_Mode::Animation: {
-                // FULL OVERRIDE: ignore SMC/error signals while animating
-                OXFP_orig::setPreemptOnError(false);
+                // Animations run with independent channels; DO NOT copy L->R.
+                // Also: ensure ANY error/blink states (red/amber/FRAG) override animations back to stock automatically.
+                OXFP_orig::setCopyLeftToRight(false);
+                OXFP_orig::setPreemptOnError(true);  // <— key change: stock preempts custom when errorActive()
 
                 OXFP_orig::ledCustomOverride([]{
+                    // If an error became active between scheduler ticks, OXFP_orig::loop will preempt before calling us.
                     const auto& c = inPreview ? previewConfig : config;
                     const unsigned long now = millis();
                     const uint8_t s = c.animSpeed ? c.animSpeed : 1;
@@ -366,7 +374,7 @@ fetchConfig();
                             uint8_t idx = (animFrame & 0x01);
                             leds.setPixelColor(idx,        cA);
                             leds.setPixelColor(idx ^ 0x01, cB);
-                            leds.show();
+                            OXFP_orig::showMirrored();
                             break;
                         }
                         case OXFP_AnimMode::Breathing: {
@@ -375,7 +383,7 @@ fetchConfig();
                             const uint8_t bright = (uint8_t)(c.brightness * b);
                             leds.setPixelColor(0, rgbWithBrightness(c.animColorA, bright));
                             leds.setPixelColor(1, rgbWithBrightness(c.animColorB, bright));
-                            leds.show();
+                            OXFP_orig::showMirrored();
                             break;
                         }
                         case OXFP_AnimMode::Chase: {
@@ -386,7 +394,7 @@ fetchConfig();
                             uint8_t idx = (animFrame & 0x01);
                             leds.setPixelColor(idx,        cA);
                             leds.setPixelColor(idx ^ 0x01, cB);
-                            leds.show();
+                            OXFP_orig::showMirrored();
                             break;
                         }
                         case OXFP_AnimMode::RGBFade: {
@@ -398,7 +406,7 @@ fetchConfig();
                             const uint32_t col = rgbWithBrightness({r,g,b}, c.brightness);
                             leds.setPixelColor(0, col);
                             leds.setPixelColor(1, col);
-                            leds.show();
+                            OXFP_orig::showMirrored();
                             break;
                         }
                         case OXFP_AnimMode::Blinking: {
@@ -406,7 +414,7 @@ fetchConfig();
                             const bool on = (animFrame & 0x01);
                             leds.setPixelColor(0, on ? cA : 0);
                             leds.setPixelColor(1, on ? cB : 0);
-                            leds.show();
+                            OXFP_orig::showMirrored();
                             break;
                         }
                         case OXFP_AnimMode::Alternating: {
@@ -414,7 +422,7 @@ fetchConfig();
                             uint8_t idx = (animFrame & 0x01);
                             leds.setPixelColor(idx,        cA);
                             leds.setPixelColor(idx ^ 0x01, cB);
-                            leds.show();
+                            OXFP_orig::showMirrored();
                             break;
                         }
                         case OXFP_AnimMode::FireFlicker: {
@@ -428,7 +436,7 @@ fetchConfig();
                                 const uint8_t b2 = (uint8_t)random(0, 16);
                                 leds.setPixelColor(0, rgbWithBrightness({r1,g1,b1}, c.brightness));
                                 leds.setPixelColor(1, rgbWithBrightness({r2,g2,b2}, c.brightness));
-                                leds.show();
+                                OXFP_orig::showMirrored();
                             }
                             break;
                         }
@@ -447,7 +455,7 @@ fetchConfig();
                                 OXFP_RGB blended = mixRGB(c.animColorA, c.animColorB, v);
                                 leds.setPixelColor(i, rgbWithBrightness(blended, c.brightness));
                             }
-                            leds.show();
+                            OXFP_orig::showMirrored();
                             break;
                         }
                         // 8: Heartbeat
@@ -466,7 +474,7 @@ fetchConfig();
                             uint8_t bright = (uint8_t)(c.brightness * b);
                             leds.setPixelColor(0, rgbWithBrightness(c.animColorA, bright));
                             leds.setPixelColor(1, rgbWithBrightness(c.animColorB, bright));
-                            leds.show();
+                            OXFP_orig::showMirrored();
                             break;
                         }
                         // 9: OpposedBreath
@@ -477,7 +485,7 @@ fetchConfig();
                             float b1 = (sinf(t + PI) + 1.f) * 0.5f;
                             leds.setPixelColor(0, rgbWithBrightness(c.animColorA, (uint8_t)(c.brightness * b0)));
                             leds.setPixelColor(1, rgbWithBrightness(c.animColorB, (uint8_t)(c.brightness * b1)));
-                            leds.show();
+                            OXFP_orig::showMirrored();
                             break;
                         }
                         // 10: Sparkle
@@ -490,7 +498,7 @@ fetchConfig();
                             }
                             leds.setPixelColor(0, (lit == 1) ? cA : 0);
                             leds.setPixelColor(1, (lit == 2) ? cB : 0);
-                            leds.show();
+                            OXFP_orig::showMirrored();
                             break;
                         }
                         default: break;
@@ -499,6 +507,7 @@ fetchConfig();
                 return;
             }
             default: {
+                OXFP_orig::setCopyLeftToRight(true);
                 OXFP_orig::setPreemptOnError(false);
                 OXFP_orig::ledCustomOverride(nullptr);
                 return;
