@@ -1,4 +1,5 @@
-// OXFP_config.cpp — full file (older codebase, animations preempted on error; stock/static copy L->R)
+// OXFP_config.cpp — animations preempt on OG blink/error/FRAG and clone L->R; static keeps custom palette.
+// Global brightness now applied inside OXFP_orig for stock + mirrors.
 #include "OXFP_config.h"
 #include <Preferences.h>
 #include "OXFP_orig.h"
@@ -25,10 +26,8 @@ namespace {
     OXFP_Mode lastMode = OXFP_Mode::Stock;
     OXFP_AnimMode lastAnimMode = (OXFP_AnimMode)0;
 
-    inline void resetAnimState() {
-        lastAnimUpdate = 0;
-        animFrame = 0;
-    }
+    inline void resetAnimState() { lastAnimUpdate = 0; animFrame = 0; }
+    // Track last applied mode to safely reset animation state when switching modes
     inline void ensureAnimStateFor(OXFP_Mode m, OXFP_AnimMode a) {
         if (!modeInit || m != lastMode || (m == OXFP_Mode::Animation && a != lastAnimMode)) {
             resetAnimState();
@@ -38,16 +37,15 @@ namespace {
         }
     }
 
-    // Brightness scaling helper
-    uint32_t rgbWithBrightness(const OXFP_RGB& c, uint8_t brightness) {
+    // Brightness-aware color helper: 'level' is 0..255 per-frame (global cap is in OXFP_orig)
+    uint32_t rgbAtLevel(const OXFP_RGB& c, uint8_t level) {
         return leds.Color(
-            (uint8_t)((c.r * brightness) / 255),
-            (uint8_t)((c.g * brightness) / 255),
-            (uint8_t)((c.b * brightness) / 255)
+            (uint8_t)((c.r * level) / 255),
+            (uint8_t)((c.g * level) / 255),
+            (uint8_t)((c.b * level) / 255)
         );
     }
 
-    // Simple RGB mix helper
     inline OXFP_RGB mixRGB(const OXFP_RGB& a, const OXFP_RGB& b, float t) {
         if (t < 0.f) t = 0.f; else if (t > 1.f) t = 1.f;
         OXFP_RGB o;
@@ -57,35 +55,34 @@ namespace {
         return o;
     }
 
-    // Render for Static mode that still reflects Xbox error inputs with assigned colors
+    // ---- STATIC: reflect OG lines with custom palette.
+    // Additionally, when OG is NOT idle steady-green, clone LEFT -> RIGHT to match stock error mirroring (fixes RRI).
     void renderStaticWithErrorAwareness(const OXFP_Config& c) {
         // Console OFF => blank
         if (OXFP_orig::consoleIsOff()) {
             leds.clear(); OXFP_orig::showMirrored(); return;
         }
 
+        // Read instantaneous OG lines every frame
         bool LG, LR, RG, RR;
         OXFP_orig::readInputLines(LG, LR, RG, RR);
 
-        // If no error is active, show the configured static color for both pixels
-        const bool err = OXFP_orig::errorActive();
-        if (!err) {
-            const uint32_t col = rgbWithBrightness(c.greenColor, c.brightness);
-            leds.setPixelColor(0, col);
-            leds.setPixelColor(1, col);
-            OXFP_orig::showMirrored();
-            return;
-        }
+        // Idle = steady green both sides (G=1, R=0 each side)
+        const bool idle = (LG && RG && !LR && !RR);
 
-        // Error visible: per-side mapping using assigned colors
         auto pick = [&](bool g, bool r)->uint32_t {
-            if (g && r) return rgbWithBrightness(c.orangeColor, c.brightness);
-            if (r)      return rgbWithBrightness(c.redColor,    c.brightness);
-            if (g)      return rgbWithBrightness(c.greenColor,  c.brightness);
+            if (g && r) return rgbAtLevel(c.orangeColor, 255); // amber
+            if (r)      return rgbAtLevel(c.redColor,    255); // red
+            if (g)      return rgbAtLevel(c.greenColor,  255); // green
             return leds.Color(0,0,0);
         };
-        leds.setPixelColor(0, pick(LG, LR)); // LEFT
-        leds.setPixelColor(1, pick(RG, RR)); // RIGHT
+
+        // Compute LEFT from OG; during non-idle states clone to RIGHT to overcome RRI hardware quirk.
+        const uint32_t leftCol = pick(LG, LR);
+        const uint32_t rightCol = idle ? pick(RG, RR) : leftCol; // clone on blink/FRAG/error
+
+        leds.setPixelColor(0, leftCol);
+        leds.setPixelColor(1, rightCol);
         OXFP_orig::showMirrored();
     }
 
@@ -112,7 +109,7 @@ namespace {
     h1{font-size:20px;margin:0 0 12px}
     .row{display:grid;grid-template-columns:160px 1fr;gap:12px;align-items:center;margin:10px 0}
     label{color:var(--muted)}
-    select,input,button{border-radius:10px;border:1px solid var(--border);background:#11151a;color:var(--text)}
+    select,input,button{border-radius:10px;border:1px solid var(--border);background:#11151a;color:#e8ebf1}
     select,input[type=number],input[type=text]{padding:10px}
     input[type=range]{width:100%}
     input[type=color]{width:48px;height:32px;border-radius:6px;padding:0;border:0;background:transparent}
@@ -124,7 +121,7 @@ namespace {
     .ghost{background:transparent}
     .warn{background:var(--accent-2);border-color:transparent;color:#08101a;font-weight:600}
     .danger{background:var(--danger);border-color:transparent;color:white}
-    .badge{display:inline-block;padding:2px 8px;border-radius:999px;background:#12151b;border:1px solid var(--border);color:var(--muted);font-size:12px;margin-left:8px}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;background:#12151b;border:1px solid var(--border);color:#99a2b2;font-size:12px;margin-left:8px}
     .section-title{display:flex;align-items:center;gap:8px;margin-top:8px}
   </style>
 </head>
@@ -166,7 +163,7 @@ namespace {
           <input type="color" id="orangeColor">
         </div>
       </div>
-      <div class="hint">Used for OG-status mapping when in Static mode (and for error visibility).</div>
+      <div class="hint">Used when in Static mode. Errors still show using these mapped colors.</div>
     </div>
 
     <div id="animBlock" class="section" style="display:none">
@@ -238,10 +235,8 @@ function updateVisibility() {
 
 function updateAnimUI() {
   let anim = +document.getElementById('animMode').value;
-  // RGB Fade (3) and Fire (6) generate colors; hide pickers there. Others use the two pickers.
   let showColors = ![3,6].includes(anim);
   document.getElementById('animColorRow').style.display = showColors ? '' : 'none';
-  // Fire ignores speed slider
   document.getElementById('animSpeedRow').style.display = (anim==6) ? 'none' : '';
 }
 
@@ -319,31 +314,32 @@ fetchConfig();
 
     // ========= Unified renderer =========
     void renderFromConfig(const OXFP_Config& c) {
+        // Always keep global brightness in sync (affects stock + mirrors + custom)
+        OXFP_orig::setGlobalBrightness(c.brightness);
+
         // Console OFF always blanks (regardless of mode)
         if (OXFP_orig::consoleIsOff()) {
-            OXFP_orig::setPreemptOnError(false);
-            OXFP_orig::setCopyLeftToRight(true); // harmless when off (both end up off anyway)
             OXFP_orig::ledCustomOverride([]{
                 leds.clear(); OXFP_orig::showMirrored();
             });
             return;
         }
 
-        // Reset animation state on mode/anim changes to avoid stale indexes (fixes Color Bounce)
         ensureAnimStateFor(c.mode, c.animMode);
 
         switch (c.mode) {
             case OXFP_Mode::Stock: {
-                // Stock + copy L->R (per requirement)
+                // Plain stock; mirror left->right at the OXFP_orig layer
                 OXFP_orig::setCopyLeftToRight(true);
                 OXFP_orig::setPreemptOnError(false);
+                OXFP_orig::setPreemptOnNonIdle(false);
                 OXFP_orig::ledCustomOverride(nullptr);
                 return;
             }
             case OXFP_Mode::Static: {
-                // Static + copy L->R (per requirement)
-                OXFP_orig::setCopyLeftToRight(true);
+                // Static uses custom renderer; FRAG/blink/error map via user palette and clone L->R on non-idle
                 OXFP_orig::setPreemptOnError(false);
+                OXFP_orig::setPreemptOnNonIdle(false);
                 OXFP_orig::ledCustomOverride([]{
                     const auto& cc = inPreview ? previewConfig : config;
                     renderStaticWithErrorAwareness(cc);
@@ -351,26 +347,21 @@ fetchConfig();
                 return;
             }
             case OXFP_Mode::Animation: {
-                // Animations run with independent channels; DO NOT copy L->R.
-                // Also: ensure ANY error/blink states (red/amber/FRAG) override animations back to stock automatically.
-                OXFP_orig::setCopyLeftToRight(false);
-                OXFP_orig::setPreemptOnError(true);  // <— key change: stock preempts custom when errorActive()
-
+                // Let OG blink + error/FRAG preempt; during preemption OXFP_orig clones L->R automatically.
+                OXFP_orig::setPreemptOnError(true);
+                OXFP_orig::setPreemptOnNonIdle(true);
                 OXFP_orig::ledCustomOverride([]{
-                    // If an error became active between scheduler ticks, OXFP_orig::loop will preempt before calling us.
                     const auto& c = inPreview ? previewConfig : config;
                     const unsigned long now = millis();
                     const uint8_t s = c.animSpeed ? c.animSpeed : 1;
 
-                    const uint32_t cA = rgbWithBrightness(c.animColorA, c.brightness);
-                    const uint32_t cB = rgbWithBrightness(c.animColorB, c.brightness);
+                    // --- Normal animation frame (only runs when OG is steady idle) ---
+                    const uint32_t cA = rgbAtLevel(c.animColorA, 255);
+                    const uint32_t cB = rgbAtLevel(c.animColorB, 255);
 
                     switch (c.animMode) {
                         case OXFP_AnimMode::ColorBounce: {
-                            if (now - lastAnimUpdate > (400 / s)) {
-                                animFrame ^= 1;
-                                lastAnimUpdate = now;
-                            }
+                            if (now - lastAnimUpdate > (400 / s)) { animFrame ^= 1; lastAnimUpdate = now; }
                             uint8_t idx = (animFrame & 0x01);
                             leds.setPixelColor(idx,        cA);
                             leds.setPixelColor(idx ^ 0x01, cB);
@@ -380,17 +371,14 @@ fetchConfig();
                         case OXFP_AnimMode::Breathing: {
                             if (now - lastAnimUpdate > 16) { lastAnimUpdate = now; animFrame++; }
                             const float b = (sinf(animFrame / 12.0f) + 1.0f) * 0.5f;
-                            const uint8_t bright = (uint8_t)(c.brightness * b);
-                            leds.setPixelColor(0, rgbWithBrightness(c.animColorA, bright));
-                            leds.setPixelColor(1, rgbWithBrightness(c.animColorB, bright));
+                            const uint8_t level = (uint8_t)(255 * b);
+                            leds.setPixelColor(0, rgbAtLevel(c.animColorA, level));
+                            leds.setPixelColor(1, rgbAtLevel(c.animColorB, level));
                             OXFP_orig::showMirrored();
                             break;
                         }
                         case OXFP_AnimMode::Chase: {
-                            if (now - lastAnimUpdate > (200 / s)) {
-                                animFrame = (animFrame + 1) & 0x01;
-                                lastAnimUpdate = now;
-                            }
+                            if (now - lastAnimUpdate > (200 / s)) { animFrame = (animFrame + 1) & 0x01; lastAnimUpdate = now; }
                             uint8_t idx = (animFrame & 0x01);
                             leds.setPixelColor(idx,        cA);
                             leds.setPixelColor(idx ^ 0x01, cB);
@@ -403,7 +391,7 @@ fetchConfig();
                             const uint8_t r = (uint8_t)(sinf(2.0f * PI * x) * 127 + 128);
                             const uint8_t g = (uint8_t)(sinf(2.0f * PI * x + 2.09f) * 127 + 128);
                             const uint8_t b = (uint8_t)(sinf(2.0f * PI * x + 4.19f) * 127 + 128);
-                            const uint32_t col = rgbWithBrightness({r,g,b}, c.brightness);
+                            const uint32_t col = rgbAtLevel({r,g,b}, 255);
                             leds.setPixelColor(0, col);
                             leds.setPixelColor(1, col);
                             OXFP_orig::showMirrored();
@@ -434,14 +422,13 @@ fetchConfig();
                                 const uint8_t r2 = 180 + (uint8_t)random(0, 75);
                                 const uint8_t g2 =  50 + (uint8_t)random(0, 60);
                                 const uint8_t b2 = (uint8_t)random(0, 16);
-                                leds.setPixelColor(0, rgbWithBrightness({r1,g1,b1}, c.brightness));
-                                leds.setPixelColor(1, rgbWithBrightness({r2,g2,b2}, c.brightness));
+                                leds.setPixelColor(0, rgbAtLevel({r1,g1,b1}, 255));
+                                leds.setPixelColor(1, rgbAtLevel({r2,g2,b2}, 255));
                                 OXFP_orig::showMirrored();
                             }
                             break;
                         }
-                        // 7: Plasma
-                        case (OXFP_AnimMode)7: {
+                        case (OXFP_AnimMode)7: { // Plasma
                             const float time = now * (0.0015f * s);
                             const int N = leds.numPixels();
                             const float denom = (N > 1) ? float(N - 1) : 1.f;
@@ -453,13 +440,12 @@ fetchConfig();
                                     sinf(6.28318f * (x * 0.70f + 0.33f) + time * 0.90f);
                                 v = (v + 3.0f) / 6.0f;
                                 OXFP_RGB blended = mixRGB(c.animColorA, c.animColorB, v);
-                                leds.setPixelColor(i, rgbWithBrightness(blended, c.brightness));
+                                leds.setPixelColor(i, rgbAtLevel(blended, 255));
                             }
                             OXFP_orig::showMirrored();
                             break;
                         }
-                        // 8: Heartbeat
-                        case (OXFP_AnimMode)8: {
+                        case (OXFP_AnimMode)8: { // Heartbeat
                             const uint16_t stepMs = 16;
                             if (now - lastAnimUpdate > stepMs) { lastAnimUpdate = now; animFrame++; }
                             const uint16_t T = (uint16_t)(64 - (s - 1) * 4);
@@ -471,31 +457,26 @@ fetchConfig();
                             };
                             float b = max(tri(u, 4, 4), tri(u, 16, 6));
                             b = max(b, 0.08f);
-                            uint8_t bright = (uint8_t)(c.brightness * b);
-                            leds.setPixelColor(0, rgbWithBrightness(c.animColorA, bright));
-                            leds.setPixelColor(1, rgbWithBrightness(c.animColorB, bright));
+                            uint8_t level = (uint8_t)(255 * b);
+                            leds.setPixelColor(0, rgbAtLevel(c.animColorA, level));
+                            leds.setPixelColor(1, rgbAtLevel(c.animColorB, level));
                             OXFP_orig::showMirrored();
                             break;
                         }
-                        // 9: OpposedBreath
-                        case (OXFP_AnimMode)9: {
+                        case (OXFP_AnimMode)9: { // OpposedBreath
                             if (now - lastAnimUpdate > 16) { lastAnimUpdate = now; animFrame++; }
                             float t = animFrame / (12.0f * (1.0f + (10 - s) * 0.1f));
                             float b0 = (sinf(t) + 1.f) * 0.5f;
                             float b1 = (sinf(t + PI) + 1.f) * 0.5f;
-                            leds.setPixelColor(0, rgbWithBrightness(c.animColorA, (uint8_t)(c.brightness * b0)));
-                            leds.setPixelColor(1, rgbWithBrightness(c.animColorB, (uint8_t)(c.brightness * b1)));
+                            leds.setPixelColor(0, rgbAtLevel(c.animColorA, (uint8_t)(255 * b0)));
+                            leds.setPixelColor(1, rgbAtLevel(c.animColorB, (uint8_t)(255 * b1)));
                             OXFP_orig::showMirrored();
                             break;
                         }
-                        // 10: Sparkle
-                        case (OXFP_AnimMode)10: {
+                        case (OXFP_AnimMode)10: { // Sparkle
                             const uint16_t interval = (uint16_t)max(60, 260 - s * 20);
                             static uint8_t lit = 0; // 0=none, 1=left, 2=right
-                            if (now - lastAnimUpdate > interval) {
-                                lastAnimUpdate = now;
-                                lit = (uint8_t)random(0, 3);
-                            }
+                            if (now - lastAnimUpdate > interval) { lastAnimUpdate = now; lit = (uint8_t)random(0, 3); }
                             leds.setPixelColor(0, (lit == 1) ? cA : 0);
                             leds.setPixelColor(1, (lit == 2) ? cB : 0);
                             OXFP_orig::showMirrored();
@@ -507,8 +488,8 @@ fetchConfig();
                 return;
             }
             default: {
-                OXFP_orig::setCopyLeftToRight(true);
                 OXFP_orig::setPreemptOnError(false);
+                OXFP_orig::setPreemptOnNonIdle(false);
                 OXFP_orig::ledCustomOverride(nullptr);
                 return;
             }
@@ -553,33 +534,24 @@ void OXFP_config::resetPreferences() {
 }
 const OXFP_Config& OXFP_config::getConfig() { return config; }
 
-// Programmatic setter (used by UDP and future integrations)
 void OXFP_config::setConfig(const OXFP_Config& newCfg, bool alsoSave) {
-    // Cancel any active preview so the new config isn't overridden
-    inPreview = false;
-    previewTimer = 0;
-
-    // Replace live config and apply immediately
+    inPreview = false; previewTimer = 0;
     config = newCfg;
-    if (alsoSave) {
-        savePreferences();
-    }
+    if (alsoSave) savePreferences();
     applyConfig();
 }
 
-
 // ---------------- Lifecycle ----------------
 void OXFP_config::preview(const OXFP_Config& tmp) {
-    inPreview = true;
-    previewConfig = tmp;
-    previewTimer = millis();
+    inPreview = true; previewConfig = tmp; previewTimer = millis();
 }
 void OXFP_config::applyConfig() {
     // Auto-exit preview after 8s
-    if (inPreview && (millis() - previewTimer > 8000)) {
-        endPreview();
-    }
-    renderFromConfig(inPreview ? previewConfig : config);
+    if (inPreview && (millis() - previewTimer > 8000)) { endPreview(); }
+    const OXFP_Config& c = inPreview ? previewConfig : config;
+    // keep global brightness synced for both stock and custom
+    OXFP_orig::setGlobalBrightness(c.brightness);
+    renderFromConfig(c);
 }
 
 // ---------------- Web UI & API ----------------
@@ -617,9 +589,7 @@ static String configToJson(const OXFP_Config& c) {
 
     doc["animSpeed"] = c.animSpeed;
 
-    String out;
-    serializeJson(doc, out);
-    return out;
+    String out; serializeJson(doc, out); return out;
 }
 
 void OXFP_config::begin(AsyncWebServer& server) {
@@ -638,17 +608,13 @@ void OXFP_config::begin(AsyncWebServer& server) {
         request->send(200, "application/json", configToJson(config));
     });
 
-    // ---- API: preview (chunk-safe body aggregator) ----
+    // ---- API: preview ----
     server.on("/api/ledpreview", HTTP_POST,
         [](AsyncWebServerRequest *request) {},
         NULL,
         [](AsyncWebServerRequest *request, uint8_t* data, size_t len, size_t index, size_t total){
-            if (index == 0) {
-                request->_tempObject = new String();
-                ((String*)request->_tempObject)->reserve(total);
-            }
-            String* body = (String*)request->_tempObject;
-            body->concat((const char*)data, len);
+            if (index == 0) { request->_tempObject = new String(); ((String*)request->_tempObject)->reserve(total); }
+            String* body = (String*)request->_tempObject; body->concat((const char*)data, len);
 
             if (index + len == total) {
                 StaticJsonDocument<384> doc;
@@ -676,17 +642,13 @@ void OXFP_config::begin(AsyncWebServer& server) {
         }
     );
 
-    // ---- API: save (chunk-safe body aggregator) ----
+    // ---- API: save ----
     server.on("/api/ledsave", HTTP_POST,
         [](AsyncWebServerRequest *request) {},
         NULL,
         [](AsyncWebServerRequest *request, uint8_t* data, size_t len, size_t index, size_t total){
-            if (index == 0) {
-                request->_tempObject = new String();
-                ((String*)request->_tempObject)->reserve(total);
-            }
-            String* body = (String*)request->_tempObject;
-            body->concat((const char*)data, len);
+            if (index == 0) { request->_tempObject = new String(); ((String*)request->_tempObject)->reserve(total); }
+            String* body = (String*)request->_tempObject; body->concat((const char*)data, len);
 
             if (index + len == total) {
                 StaticJsonDocument<384> doc;
@@ -722,6 +684,4 @@ void OXFP_config::begin(AsyncWebServer& server) {
         OXFP_config::applyConfig();
         request->send(200, "text/plain", "Reset to defaults.");
     });
-
-    // NOTE: no "/" handler and no onNotFound — to avoid clobbering your Wi-Fi portal.
 }

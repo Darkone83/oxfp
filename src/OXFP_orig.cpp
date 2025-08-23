@@ -4,8 +4,6 @@
 
 // ==========================
 // Optional self-test (compile-time)
-// Set to 1 to bypass inputs and cycle both channels so you can confirm
-// that LEFT (pixel 0) and RIGHT (pixel 1) + both external strips update.
 // ==========================
 // #define OXFP_SELFTEST 1
 #ifndef OXFP_SELFTEST
@@ -34,8 +32,6 @@ Adafruit_NeoPixel leds(NUM_LEDS, WS2812_PIN, NEO_GRB + NEO_KHZ800);
 #define EXT_MIRROR_RIGHT_PIN  3
 #endif
 
-// You MUST declare a pixel count to drive a WS2812 strip.
-// If the actual strip is shorter, the extra data is safely ignored.
 #ifndef EXT_MIRROR_LEFT_COUNT
 #define EXT_MIRROR_LEFT_COUNT   30
 #endif
@@ -49,12 +45,16 @@ static Adafruit_NeoPixel extRight(EXT_MIRROR_RIGHT_COUNT, EXT_MIRROR_RIGHT_PIN, 
 namespace {
   void (*customHandler)(void) = nullptr;
   bool preemptOnError = false;
+  bool preemptOnNonIdle = false;     // NEW: preempt when OG is not steady idle-green
+  bool copyLeftToRight = false;      // runtime mirror for stock (no custom active)
 
-  // NEW: runtime toggle — copy left pixel to right (used for Stock; can be enabled for Static)
-  bool copyLeftToRight = false;
+  bool preemptActive = false;        // NEW: set true for the current frame when stock preempts custom
 
   uint32_t lastAnyHighMs = 0;
   const uint32_t offDebounceMs = 300;
+
+  // Global brightness (caps everything, including stock + mirrors)
+  uint8_t gBrightness = 255;
 
   inline bool lineOn(uint8_t pin) { return digitalRead(pin) == HIGH; }
 
@@ -74,6 +74,11 @@ namespace {
     const uint16_t n = s.numPixels();
     for (uint16_t i = 0; i < n; ++i) s.setPixelColor(i, color);
     s.show();
+  }
+
+  inline bool isIdleGreen(bool LG, bool LR, bool RG, bool RR) {
+    // Idle == steady green both sides (G=1, R=0 each side)
+    return (LG && RG && !LR && !RR);
   }
 
 #if OXFP_SELFTEST
@@ -110,17 +115,17 @@ void begin() {
   pinMode(PIN_RRI, INPUT_PULLDOWN);
 
   leds.begin();
-  leds.setBrightness(255);
+  leds.setBrightness(gBrightness);
   leds.clear();
   leds.show();
 
   extLeft.begin();
-  extLeft.setBrightness(255);
+  extLeft.setBrightness(gBrightness);
   extLeft.clear();
   extLeft.show();
 
   extRight.begin();
-  extRight.setBrightness(255);
+  extRight.setBrightness(gBrightness);
   extRight.clear();
   extRight.show();
 }
@@ -133,10 +138,12 @@ void showMirrored() {
   uint32_t leftCol  = leds.getPixelColor(PIXEL_LEFT);
   uint32_t rightCol = leds.getPixelColor(PIXEL_RIGHT);
 
-  // Only copy LEFT->RIGHT when no custom handler is active (i.e., Stock),
-  // and the runtime flag is enabled.
-  if ((customHandler == nullptr) && copyLeftToRight) {
-    rightCol = leftCol;
+  // Clone LEFT->RIGHT during stock preemption (animation mode letting OG through),
+  // OR when running stock with copyLeftToRight enabled and no custom handler.
+  if (preemptActive) {
+    rightCol = leftCol;                      // clone for this frame
+  } else if ((customHandler == nullptr) && copyLeftToRight) {
+    rightCol = leftCol;                      // stock mirror
   }
 
   // Write back (ensures both internal pixels reflect same values we mirror)
@@ -147,15 +154,19 @@ void showMirrored() {
   // Fill entire external strips with their respective colors
   mirrorFillStrip(extLeft,  leftCol);
   mirrorFillStrip(extRight, rightCol);
+
+  // Only valid for this frame
+  preemptActive = false;
 }
 
 void loop() {
 #if OXFP_SELFTEST
-  // Bypass inputs; prove both channels are driven independently
   runSelfTest();
   showMirrored();
   return;
 #endif
+
+  preemptActive = false; // default each tick
 
   const bool LG = lineOn(PIN_LGI);
   const bool LR = lineOn(PIN_LRI);
@@ -172,25 +183,37 @@ void loop() {
   }
 
   const bool isError = (LR || RR || (LG && LR) || (RG && RR));
+  const bool idle    = isIdleGreen(LG, LR, RG, RR);
 
-  // Preempt custom during error (for animations) if requested
-  if (customHandler && preemptOnError && isError) {
-    renderStock(LG, LR, RG, RR);
+  // Preempt custom during error/FRAG OR for any non-idle blinking states if requested
+  if (customHandler && ((preemptOnError && isError) || (preemptOnNonIdle && !idle))) {
+    preemptActive = true;            // triggers L->R clone in showMirrored()
+    renderStock(LG, LR, RG, RR);     // stock hues from OG lines
     showMirrored();
     return;
   }
 
   // Custom or stock
-  if (customHandler) { customHandler(); showMirrored(); return; }
-  renderStock(LG, LR, RG, RR);
+  if (customHandler) {
+    customHandler();                 // user/animation draws
+    showMirrored();
+    return;
+  }
+  renderStock(LG, LR, RG, RR);       // plain stock
   showMirrored();
 }
 
 void ledCustomOverride(void (*handler)(void)) { customHandler = handler; }
 void setPreemptOnError(bool enable) { preemptOnError = enable; }
-
-// NEW: expose runtime control for LEFT->RIGHT copying
+void setPreemptOnNonIdle(bool enable) { preemptOnNonIdle = enable; }
 void setCopyLeftToRight(bool enable) { copyLeftToRight = enable; }
+
+void setGlobalBrightness(uint8_t b) {
+  gBrightness = b ? b : 1;           // avoid 0 internal clamp oddities
+  leds.setBrightness(gBrightness);
+  extLeft.setBrightness(gBrightness);
+  extRight.setBrightness(gBrightness);
+}
 
 // --- Query helpers ---
 void readInputLines(bool& leftGreen, bool& leftRed, bool& rightGreen, bool& rightRed) {
