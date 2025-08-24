@@ -76,7 +76,7 @@ Remove the connector from your original Xbox front panel and solder to the OXFP 
 
 If you can't reuse your original XBOX FP harness, an alternate can be sourced
 
-PHD 2.0 10p : <a href="https://www.aliexpress.us/item/3256807761209020.html?spm=a2g0o.order_list.order_list_main.59.2dc11802OOCfQn&gatewayAdapt=glo2usa">Aliexpress</>
+PHD 2.0 10p : <a href="https://www.aliexpress.us/item/3256807761209020.html?spm=a2g0o.order_list.order_list_main.59.2dc11802OOCfQn&gatewayAdapt=glo2usa">Aliexpress</a>
 
 ---
 
