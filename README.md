@@ -10,6 +10,8 @@ OXFP is a highly flexible RGB controller for the original Xbox front panel, supp
   <img src="https://github.com/Darkone83/oxfp/blob/main/images/Render_Front.png" width=500 height=300><img src="https://github.com/Darkone83/oxfp/blob/main/images/Render_Back.png" width=500 height=300>
 </div>
 
+<a href="https://discord.gg/k2BQhSJ"><img src="https://github.com/Darkone83/ModXo-Basic/blob/main/Images/discord.svg"></a>
+
 ---
 
 ## Features
